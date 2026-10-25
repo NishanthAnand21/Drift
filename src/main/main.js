@@ -110,6 +110,11 @@ const CHROME_UA = () => {
 const ASK_PERMS = new Set(['media', 'geolocation', 'notifications', 'midi', 'midiSysex', 'clipboard-read', 'display-capture', 'idle-detection', 'serial', 'hid', 'usb', 'window-management', 'storage-access', 'top-level-storage-access', 'speaker-selection', 'keyboardLock'])
 const AUTO_ALLOW = new Set(['clipboard-sanitized-write', 'fullscreen', 'pointerLock', 'persistent-storage'])
 
+// Icon for tabs that haven't loaded yet: the site's standard /favicon.ico (HTTPS only)
+function iconFor (t) {
+  if (t.favicon) return t.favicon
+  try { const u = new URL(t.url); return u.protocol === 'https:' ? u.origin + '/favicon.ico' : null } catch { return null }
+}
 function originOf (u) { try { return new URL(u).origin } catch { return '' } }
 
 async function askPermission (wc, permission, origin, details) {
@@ -703,13 +708,13 @@ function paletteSnapshot () {
   const sp = space()
   const tabs = []
   for (const s of S.spaces) {
-    for (const id of [...s.pinned, ...s.today]) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: t.favicon, space: s.name }) }
+    for (const id of [...s.pinned, ...s.today]) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: s.name }) }
   }
-  for (const id of profile(sp.profileId).favorites) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: t.favicon, space: 'Favorites' }) }
+  for (const id of profile(sp.profileId).favorites) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: 'Favorites' }) }
   return {
     tabs,
     history: S.history.slice(0, 1500),
-    archive: S.archive.map((a, i) => ({ i, title: a.title, url: a.url, favicon: a.favicon, archivedAt: a.archivedAt })),
+    archive: S.archive.map((a, i) => ({ i, title: a.title, url: a.url, favicon: iconFor(a), archivedAt: a.archivedAt })),
     commands: COMMANDS.map(c => ({ id: c.id, title: typeof c.title === 'function' ? c.title() : c.title, keys: c.keys || '' })),
     color: sp.color,
     engine: ENGINES[S.settings.searchEngine].name,
@@ -846,7 +851,7 @@ function pushState () {
   const t = (id) => {
     const x = tab(id); if (!x) return null
     const l = live.get(id)
-    return { id, title: x.title, url: x.url, favicon: x.favicon, loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted }
+    return { id, title: x.title, url: x.url, favicon: iconFor(x), loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted }
   }
   const act = sp.activeTabId; const l = live.get(act)
   win.webContents.send('state', {

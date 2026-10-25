@@ -12,6 +12,8 @@ module.exports = (D) => {
     await wait(2500)
     const sp = () => D.space()
     try {
+      // an unloaded favourite should still show its real site icon
+      const fav0 = D.S.profiles[0].favorites[0]; D.S.tabs[fav0].url = 'https://nodejs.org/'; D.S.tabs[fav0].favicon = null
       const a = D.newTab('https://nodejs.org/en'); await loaded(a); await wait(1500)
       ok('browse real site', /Node/.test(D.tab(a).title), D.tab(a).title)
       const b = D.newTab('http://neverssl.com'); await loaded(b); await wait(800)
@@ -23,6 +25,8 @@ module.exports = (D) => {
       D.openSplit(a); await wait(1500)
       ok('split view', sp().split && D.win.contentView.children.length >= 2)
       await shot('1-split')
+      const icon = await D.win.webContents.executeJavaScript(`(() => { const i = document.querySelector('#favorites .fav img'); return i && i.complete && i.naturalWidth > 0 ? i.src : '' })()`)
+      ok('unloaded favourite shows site icon', !D.views.has(fav0) && /nodejs\.org\/favicon\.ico/.test(icon), icon)
       D.ACTIONS.unsplit()
       D.commandBar('new'); await wait(800); await shot('2-command-bar')
       ok('command bar opens', D.overlayOpen?.mode === 'new'); D.closeOverlay()
