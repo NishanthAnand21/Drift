@@ -1,17 +1,16 @@
 :root{--space:#7c5cff;--sw:260px;--bg:#e9e4f7;color-scheme:light;
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   --fg:#1d1a24;--muted:#1d1a2494;--fill:#ffffff3d;--hover:#ffffff38;--active:#ffffffd6;--line:#00000017;--shadow:0 1px 3px #0000001f}
 :root[data-mode=dark]{color-scheme:dark;--fg:#f1eef8;--muted:#f1eef894;--fill:#ffffff12;--hover:#ffffff10;--active:#ffffff26;--line:#ffffff1c;--shadow:0 1px 3px #0000004d}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden;font:14px -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);user-select:none;-webkit-font-smoothing:antialiased}
-body.grain::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;mix-blend-mode:overlay;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+body.grain::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;mix-blend-mode:overlay;background-image:var(--grain)}
 button{font:inherit;color:inherit;background:none;border:0;cursor:default;padding:0}
 svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none;display:block}
 .drag{-webkit-app-region:drag}.drag button{-webkit-app-region:no-drag}
 .flex{flex:1}
 #sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sw);display:flex;flex-direction:column;padding:0 8px 8px 10px;transition:transform .18s ease;z-index:2}
 body.collapsed #sidebar{transform:translateX(-100%)}
-body.collapsed.peek #sidebar{transform:none;background:var(--bg);box-shadow:0 0 30px #0004;border-radius:0 12px 12px 0;z-index:5}
 .top{height:48px;display:flex;align-items:center;gap:2px;flex:none}
 .lights{width:72px}
 body:not(.mac) .lights,body.fullscreen .lights{width:2px}
@@ -153,3 +152,11 @@ body.dim-unloaded .fav.unloaded:not(.active) img,body.dim-unloaded .fav.unloaded
 body.dim-unloaded .fav.unloaded:hover img,body.dim-unloaded .row.unloaded:hover img{opacity:.7}
 /* option: hide the “back to pinned page” button */
 body.no-pin-reset .row .home{display:none}
+/* floating sidebar: its own transparent view stacked above the page while the sidebar is hidden */
+html.float,html.float body{background:transparent}
+html.float body #sidebar{left:6px;top:6px;bottom:6px;width:var(--sw);border-radius:10px;background:var(--bg);
+  box-shadow:0 0 0 .5px var(--line),0 12px 28px #00000052;transform:translateX(calc(-100% - 12px));transition:transform .16s cubic-bezier(.2,.8,.2,1)}
+html.float body.peek #sidebar{transform:none}
+html.float body.grain::before{content:none}
+html.float body.grain #sidebar::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;opacity:.22;mix-blend-mode:overlay;background-image:var(--grain)}
+html.float #resizer,html.float #panes,html.float #content,html.float #peek-edge,html.float #toasts{display:none}

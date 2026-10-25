@@ -1,7 +1,7 @@
 'use strict'
 const {
   app, BrowserWindow, WebContentsView, Menu, ipcMain, session, dialog, shell,
-  clipboard, ClipboardItem, protocol, net, nativeTheme, desktopCapturer, globalShortcut, nativeImage, webContents
+  clipboard, ClipboardItem, protocol, net, nativeTheme, desktopCapturer, globalShortcut, nativeImage, webContents, screen
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -713,7 +713,7 @@ function pageContextMenu (tabId, wc, p) {
     { label: 'Inspect Element', click: () => wc.inspectElement(p.x, p.y) })
   const extItems = (() => { try { return extFor(tabId)?.getContextMenuItems(wc, p) || [] } catch { return [] } })()
   if (extItems.length) items.push({ type: 'separator' }, ...extItems)
-  Menu.buildFromTemplate(items).popup({ window: win })
+  Menu.buildFromTemplate(items).popup(menuOpts())
 }
 
 // ---------------------------------------------------------------- tab ops
@@ -884,7 +884,7 @@ function folderMenu (fid) {
     { label: 'Unload All Tabs in Folder', enabled: f.items.some(id => views.has(id)), click: () => { for (const id of f.items) closeTab(id) } },
     { type: 'separator' },
     { label: 'Delete Folder (keep its tabs)', click: () => deleteFolder(fid) }
-  ]).popup({ window: win })
+  ]).popup(menuOpts())
 }
 function togglePin (tabId = activeTabId()) {
   const loc = locate(tabId); if (!loc) return
@@ -1009,7 +1009,6 @@ function addHistory (url, title) {
 
 // ---------------------------------------------------------------- layout
 const SIDEBAR_MIN = 200; const SIDEBAR_MAX = 420; const PAD = 8
-function sidebarShown () { return S.sidebarVisible || sidebarPeek }
 
 function layout () {
   if (!win) return
@@ -1023,7 +1022,8 @@ function layout () {
   if (htmlFullscreen && views.has(htmlFullscreen)) needed.splice(0, needed.length, htmlFullscreen)
 
   for (const [id, v] of views) if (!needed.includes(id)) { try { win.contentView.removeChildView(v) } catch {} }
-  const sw = sidebarShown() ? S.settings.sidebarWidth : 0
+  // only the docked sidebar takes room; the peeked one floats over the page (placeSidebarFloat)
+  const sw = S.sidebarVisible ? S.settings.sidebarWidth : 0
   const x0 = sw || PAD
   const chatW = chatOpen && !htmlFullscreen ? CHAT_W + 6 : 0
   const area = { x: x0, y: PAD, width: Math.max(100, w - x0 - PAD - chatW), height: Math.max(100, h - PAD * 2) }
@@ -1042,8 +1042,71 @@ function layout () {
     v.setBorderRadius?.(10)
     v.setBounds(rects[i])
   })
+  placeSidebarFloat()
+  // traffic lights belong to the sidebar: hidden with it, back when it peeks (like Arc)
+  if (isMac) win.setWindowButtonVisibility?.(!htmlFullscreen && (S.sidebarVisible || sidebarPeek))
   lastLayout = { area, rects, dir: sp.split?.dir || 'row' }
   win.webContents.send('layout', { area, panes: needed.length > 1 && !htmlFullscreen ? needed.map((id, i) => ({ id, ...rects[i], active: id === act })) : null, dir: sp.split?.dir || 'row' })
+}
+
+// ---------------------------------------------------------------- floating sidebar
+// Hovering the left edge while the sidebar is hidden floats it over the page instead of pushing the
+// page aside, like Arc. It's a second copy of the sidebar UI in its own view stacked above the tabs;
+// only the sidebar button (⌘S) docks it and resizes the page.
+const FLOAT_INSET = 6; const FLOAT_SHADOW = 28
+let sidebarFloat = null; let peekTimer = null; let floatHideTimer = null; let menuOpen = 0
+function ensureSidebarFloat () {
+  if (sidebarFloat) return sidebarFloat
+  sidebarFloat = new WebContentsView({ webPreferences: { preload: fs.existsSync(MAIN_PRELOAD) ? MAIN_PRELOAD : PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false } })
+  sidebarFloat.setBackgroundColor('#00000000')
+  sidebarFloat.webContents.loadURL(uiURL('index.html', { float: 1 }))
+  sidebarFloat.webContents.on('will-navigate', e => e.preventDefault())
+  sidebarFloat.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  return sidebarFloat
+}
+function placeSidebarFloat () {
+  if (!(sidebarPeek && !S.sidebarVisible && !htmlFullscreen)) {
+    if (!sidebarFloat) return
+    const remove = () => { floatHideTimer = null; if (!sidebarPeek || S.sidebarVisible) { try { win?.contentView.removeChildView(sidebarFloat) } catch {} } }
+    // let it slide out first; when docking it goes at once (the docked sidebar is already there)
+    if (S.sidebarVisible || htmlFullscreen) { clearTimeout(floatHideTimer); remove() } else if (!floatHideTimer) floatHideTimer = setTimeout(remove, 170)
+    return
+  }
+  clearTimeout(floatHideTimer); floatHideTimer = null
+  const [, h] = win.getContentSize()
+  ensureSidebarFloat()
+  win.contentView.addChildView(sidebarFloat)
+  sidebarFloat.setBounds({ x: 0, y: 0, width: S.settings.sidebarWidth + FLOAT_INSET + FLOAT_SHADOW, height: h })
+  // the command bar and popovers opened from the floating sidebar stay above it
+  if (overlayOpen) win.contentView.addChildView(overlay)
+  if (popoverOpen) win.contentView.addChildView(popView)
+  if (previewFor && previewView) win.contentView.addChildView(previewView)
+}
+function setPeek (on) {
+  clearTimeout(peekTimer); peekTimer = null
+  if (S.sidebarVisible || on === sidebarPeek) return
+  sidebarPeek = on; pushState(); layout()
+}
+// The pointer left the floating sidebar: hide it once it's really outside, and not while a menu,
+// popover or the command bar opened from it is still up (those call this again when they close)
+function peekCheck () {
+  if (!sidebarPeek || S.sidebarVisible) return
+  clearTimeout(peekTimer)
+  peekTimer = setTimeout(() => {
+    peekTimer = null
+    if (!win || win.isDestroyed() || menuOpen || popoverOpen || overlayOpen || previewFor) return
+    const p = screen.getCursorScreenPoint(); const c = win.getContentBounds()
+    const x = p.x - c.x; const y = p.y - c.y
+    if (x >= 0 && y >= 0 && y < c.height && x < S.settings.sidebarWidth + FLOAT_INSET) return
+    setPeek(false)
+  }, 180)
+}
+// Options for every native menu: counts open menus so the floating sidebar stays while one is up
+function menuOpts () { menuOpen++; return { window: win, callback: () => { menuOpen = Math.max(0, menuOpen - 1); peekCheck() } } }
+// The sidebar UI (docked, and the floating copy when it exists)
+function sendSidebar (ch, ...a) {
+  win?.webContents.send(ch, ...a)
+  if (sidebarFloat && !sidebarFloat.webContents.isDestroyed()) sidebarFloat.webContents.send(ch, ...a)
 }
 
 // ---------------------------------------------------------------- overlay (command bar, find, prompts)
@@ -1133,6 +1196,7 @@ function closeOverlay () {
   const wc = views.get(activeTabId())?.webContents
   if (wasFind && wc) { wc.stopFindInPage('clearSelection'); finder.clear(wc) }
   if (wc) wc.focus(); else win.webContents.focus()
+  peekCheck()
 }
 
 function commandBar (mode = 'new') {
@@ -1460,6 +1524,7 @@ function hideFavPreview (delay = 0) {
   previewTimer = setTimeout(() => {
     previewFor = null
     if (previewView) { try { win.contentView.removeChildView(previewView) } catch {} }
+    peekCheck()
   }, delay)
 }
 Object.assign(LATE_ACTIONS, {
@@ -1489,7 +1554,7 @@ async function downloadThumb (d) {
   try { if (isMac || process.platform === 'win32') img = await nativeImage.createThumbnailFromPath(d.path, { width: 128, height: 128 }) } catch {}
   try { if ((!img || img.isEmpty()) && /\.(png|jpe?g|gif|webp|bmp)$/i.test(d.path)) img = nativeImage.createFromPath(d.path).resize({ width: 128 }) } catch {}
   try { if (!img || img.isEmpty()) img = await app.getFileIcon(d.path, { size: 'large' }) } catch {}
-  if (img && !img.isEmpty()) { downloadThumbs.set(d.id, img.toDataURL()); win?.webContents.send('dl-thumb', d.id, downloadThumbs.get(d.id)) }
+  if (img && !img.isEmpty()) { downloadThumbs.set(d.id, img.toDataURL()); sendSidebar('dl-thumb', d.id, downloadThumbs.get(d.id)) }
 }
 const findDownload = (id) => downloads.find(d => d.id === id)
 function downloadMenu (id) {
@@ -1506,7 +1571,7 @@ function downloadMenu (id) {
     { type: 'separator' },
     { label: 'Remove from List', enabled: !item, click: () => { downloads.splice(downloads.indexOf(d), 1); store.save(); pushState() } },
     { label: 'Move to Trash', enabled: !item && exists, click: async () => { await shell.trashItem(d.path).catch(() => {}); downloads.splice(downloads.indexOf(d), 1); store.save(); pushState() } }
-  ]).popup({ window: win })
+  ]).popup(menuOpts())
 }
 Object.assign(LATE_ACTIONS, {
   'dl-open': (id) => {
@@ -1522,7 +1587,7 @@ Object.assign(LATE_ACTIONS, {
     const icon = thumb ? nativeImage.createFromDataURL(thumb).resize({ width: 64 }) : nativeImage.createFromPath(path.join(UI_DIR, 'icons', 'aurora.png')).resize({ width: 48 })
     uiSender.startDrag({ file: d.path, icon })
   },
-  'dl-thumbs': () => { for (const d of downloads.slice(0, 40)) { if (downloadThumbs.has(d.id)) win.webContents.send('dl-thumb', d.id, downloadThumbs.get(d.id)); else downloadThumb(d) } },
+  'dl-thumbs': () => { for (const d of downloads.slice(0, 40)) { if (downloadThumbs.has(d.id)) sendSidebar('dl-thumb', d.id, downloadThumbs.get(d.id)); else downloadThumb(d) } },
   'dl-clear': () => { for (let i = downloads.length - 1; i >= 0; i--) if (!activeDownloads.has(downloads[i].id)) downloads.splice(i, 1); store.save(); pushState() },
   'dl-folder': () => shell.openPath(downloadDir()),
   'dl-toggle': () => { downloadsOpen = !downloadsOpen; pushState() }
@@ -1552,7 +1617,7 @@ function openPopover (data) {
 let popoverOpen = null
 function closePopover () {
   if (popView) { try { win.contentView.removeChildView(popView) } catch {} }
-  popoverOpen = null; popItems = null; pushState()
+  popoverOpen = null; popItems = null; pushState(); peekCheck()
 }
 const PLUS_ITEMS = [
   { id: 'new-space', label: 'New Space', icon: 'spaces' },
@@ -1637,7 +1702,7 @@ async function screenshotPage () {
 }
 function shareUrl () {
   const t = tab(activeTabId()); if (!t) return
-  if (isMac) { try { const { ShareMenu } = require('electron'); new ShareMenu({ urls: [t.url] }).popup({ window: win }); return } catch {} }
+  if (isMac) { try { const { ShareMenu } = require('electron'); new ShareMenu({ urls: [t.url] }).popup(menuOpts()); return } catch {} }
   copyUrl()
 }
 function siteMoreMenu () {
@@ -1649,7 +1714,7 @@ function siteMoreMenu () {
     { label: 'Pop Out Video', click: () => runCommand('pip') },
     { label: 'Clear Cookies for This Site', enabled: !!wc, click: async () => { const cs = await wc.session.cookies.get({ url: t.url }); for (const c of cs) await wc.session.cookies.remove(t.url, c.name); toast(`Removed ${cs.length} cookies`) } },
     { label: 'Reset All Settings for This Site', click: () => { try { const u = new URL(t.url); delete S.permissions[u.origin]; delete S.siteFlags?.[u.hostname]; store.save(); toast('Site settings reset') } catch {} } }
-  ]).popup({ window: win })
+  ]).popup(menuOpts())
 }
 // ---------------------------------------------------------------- speed: warm up connections, task manager
 const preconnected = new Map()
@@ -1927,7 +1992,7 @@ function ensureClaudeAccountViews () {
       if (p.isEditable) items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' })
       else if (p.selectionText) items.push({ role: 'copy' })
       items.push({ type: 'separator' }, { label: 'Reload', click: () => wc.reload() })
-      Menu.buildFromTemplate(items).popup({ window: win })
+      Menu.buildFromTemplate(items).popup(menuOpts())
     })
     wc.loadURL(CLAUDE_HOME).catch(() => {})
   }
@@ -1979,7 +2044,7 @@ function chatMenu () {
     { type: 'separator' },
     ...(acct ? [{ label: 'Sign Out of Claude in Drift…', click: () => signOutClaude() }] : [{ label: claudeKey() ? 'Change API Key…' : 'Add API Key…', click: () => promptClaudeKey() }]),
     { label: 'Claude Settings…', click: () => openSettings('integrations') }
-  ]).popup({ window: win })
+  ]).popup(menuOpts())
 }
 async function signOutClaude () {
   const { response } = await dialog.showMessageBox(win, { type: 'question', buttons: ['Sign Out', 'Cancel'], defaultId: 1, cancelId: 1, message: 'Sign out of your Claude account in Drift?', detail: 'This clears claude.ai cookies and data stored by Drift. Your chats stay in your Claude account.' })
@@ -2320,7 +2385,7 @@ function zoom (dir) {
   wc.setZoomLevel(z); toast(`Zoom ${Math.round(Math.pow(1.2, z) * 100)}%`)
 }
 function findInPage () { if (activeTabId()) openOverlay({ mode: 'find', query: '' }) }
-function toggleSidebar () { S.sidebarVisible = !S.sidebarVisible; sidebarPeek = false; store.save(); layout(); pushState() }
+function toggleSidebar () { S.sidebarVisible = !S.sidebarVisible; sidebarPeek = false; clearTimeout(peekTimer); store.save(); layout(); pushState() }
 
 function navActive (fn) { const wc = views.get(activeTabId())?.webContents; if (wc) fn(wc) }
 
@@ -2342,7 +2407,7 @@ function tabContextMenu (tabId) {
   if (others.length) tmpl.push({ label: 'Move to Space', submenu: others.map(s => ({ label: s.name, click: () => moveTab(tabId, loc.type === 'favorite' ? 'today' : loc.type, { spaceId: s.id }) })) })
   tmpl.push({ type: 'separator' }, { label: loc.type === 'today' ? 'Close Tab' : 'Unload Tab', click: () => closeTab(tabId) })
   if (loc.type === 'today') tmpl.push({ label: 'Close Tabs Below', click: () => { const l = sp.today; for (const id of l.slice(l.indexOf(tabId) + 1)) closeTab(id) } })
-  Menu.buildFromTemplate(tmpl).popup({ window: win })
+  Menu.buildFromTemplate(tmpl).popup(menuOpts())
 }
 function spaceContextMenu (id) {
   Menu.buildFromTemplate([
@@ -2351,7 +2416,7 @@ function spaceContextMenu (id) {
     { label: 'Change Profile…', click: () => pickProfile(id) },
     { type: 'separator' },
     { label: 'Delete Space', enabled: S.spaces.length > 1, click: () => confirmDeleteSpace(id) }
-  ]).popup({ window: win })
+  ]).popup(menuOpts())
 }
 function toggleMute (tabId) {
   const wc = views.get(tabId)?.webContents; const lv = live.get(tabId); if (!wc || !lv) return
@@ -2387,7 +2452,7 @@ function siteMenu () {
     { label: 'Pop Out Video', click: () => runCommand('pip') },
     { label: 'Open in Split View…', click: () => runCommand('split') },
     { label: 'Clear Cookies for This Site', enabled: !!wc, click: async () => { const cs = await wc.session.cookies.get({ url: t.url }); for (const c of cs) await wc.session.cookies.remove(t.url, c.name); toast(`Removed ${cs.length} cookies`) } }
-  ]).popup({ window: win })
+  ]).popup(menuOpts())
 }
 
 function pushState () {
@@ -2399,7 +2464,7 @@ function pushState () {
     return { id, title: x.customTitle || x.title, url: x.url, favicon: iconFor(x), loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted, drifted: drifted(x) }
   }
   const act = sp.activeTabId; const l = live.get(act)
-  win.webContents.send('state', {
+  sendSidebar('state', {
     spaces: S.spaces.map(s => ({ id: s.id, name: s.name, icon: s.icon || '', color: s.color, theme: s.theme, profile: profile(s.profileId)?.name })),
     activeSpaceId: S.activeSpaceId,
     favorites: profile(sp.profileId).favorites.map(t).filter(Boolean),
@@ -2430,7 +2495,7 @@ function pushState () {
 function toast (msg) { win?.webContents.send('toast', msg) }
 
 // ---------------------------------------------------------------- IPC (only from our own UI views)
-const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents) || (previewView && e.sender === previewView.webContents) || (popView && e.sender === popView.webContents)
+const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents) || (previewView && e.sender === previewView.webContents) || (popView && e.sender === popView.webContents) || (sidebarFloat && e.sender === sidebarFloat.webContents)
 const ACTIONS = {
   ready: () => { pushState(); layout() },
   activate: (id) => activateTab(id),
@@ -2454,7 +2519,7 @@ const ACTIONS = {
   reload: () => navActive(wc => wc.isLoading() ? wc.stop() : wc.reload()),
   'toggle-sidebar': toggleSidebar,
   'sidebar-width': (w) => { S.settings.sidebarWidth = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(w))); layout(); pushStateSoon(); store.save() },
-  peek: (on) => { if (S.sidebarVisible) return; sidebarPeek = !!on; layout(); pushState() },
+  peek: (on) => { if (on) setPeek(true); else peekCheck() },
   'clear-today': clearToday,
   'split-drag-start': (i) => startSplitDrag(Number(i)),
   'split-drag': (x, y) => splitDrag(Number(x), Number(y)),
@@ -2668,7 +2733,7 @@ function createWindow () {
   }, 250))
   win.on('focus', () => { if (pip?.auto && pip.tabId === activeTabId()) returnVideo(pip.tabId) })
   win.on('closed', () => { for (const m of miniWindows) m.win.close() })
-  win.on('closed', () => { win = null; overlay = null; views.clear(); wcToTab.clear(); live.clear() })
+  win.on('closed', () => { win = null; overlay = null; sidebarFloat = null; views.clear(); wcToTab.clear(); live.clear() })
   // restore the active tab
   const sp = space()
   if (sp.activeTabId && tab(sp.activeTabId)) ensureView(sp.activeTabId)
@@ -2778,4 +2843,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek })

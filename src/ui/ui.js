@@ -4,6 +4,9 @@ const api = window.drift
 let S = null
 let dragId = null
 let pendingRender = false
+// The same page also runs as the floating sidebar shown when you hover the left edge while it's hidden
+const FLOAT = new URLSearchParams(location.search).has('float')
+if (FLOAT) document.documentElement.classList.add('float')
 
 const host = (u) => { try { return new URL(u).host.replace(/^www\./, '') } catch { return u } }
 
@@ -306,9 +309,12 @@ $('#b-claude').onclick = (e) => { e.stopPropagation(); api.send('toggle-chat') }
 $('#b-newspace').onclick = () => api.send('plus-menu', rectOf($('#b-newspace')))
 $('#content').ondblclick = () => api.send('command-bar', 'new')
 
-// sidebar peek when collapsed
-$('#peek-edge').onmouseenter = () => api.send('peek', true)
-$('#sidebar').onmouseleave = () => { if (S && !S.sidebarVisible) api.send('peek', false) }
+// hidden sidebar: the left edge opens the floating copy over the page; leaving it closes it
+if (FLOAT) {
+  $('#sidebar').onmouseenter = () => api.send('peek', true)
+  $('#sidebar').onmouseleave = () => api.send('peek', false)
+  document.documentElement.onmouseleave = () => api.send('peek', false)
+} else $('#peek-edge').onmouseenter = () => api.send('peek', true)
 
 // sidebar resizing
 $('#resizer').onmousedown = (e) => {
