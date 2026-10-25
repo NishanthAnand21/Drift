@@ -1,7 +1,7 @@
 'use strict'
 // Bridge for Drift's own UI pages only (never loaded into websites).
 const { contextBridge, ipcRenderer } = require('electron')
-const CHANNELS = new Set(['state', 'toast', 'layout', 'open', 'find-result', 'settings', 'chat', 'mini', 'mini-focus', 'peek-title'])
+const CHANNELS = new Set(['state', 'toast', 'layout', 'open', 'find-result', 'settings', 'chat', 'mini', 'mini-focus', 'peek-title', 'dl-thumb', 'popover', 'preview'])
 contextBridge.exposeInMainWorld('drift', {
   send: (action, ...args) => ipcRenderer.send('ui', action, ...args),
   suggest: (q) => ipcRenderer.invoke('suggest', q),

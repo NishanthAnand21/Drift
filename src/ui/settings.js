@@ -4,7 +4,7 @@ const $ = (s) => document.querySelector(s)
 let D = null; let current = 'general'
 
 const PAGES = [
-  ['general', '⚙', 'General'], ['profiles', '◉', 'Profiles'], ['tidy', '✦', 'Tidy'], ['links', '⧉', 'Links'],
+  ['general', '⚙', 'General'], ['profiles', '◉', 'Profiles'], ['spaces', '◐', 'Spaces'], ['tidy', '✦', 'Tidy'], ['links', '⧉', 'Links'],
   ['privacy', '⛨', 'Privacy & Security'], ['integrations', '⌬', 'Integrations'], ['shortcuts', '⌘', 'Shortcuts'], ['icon', '◎', 'Icon'], ['advanced', '☰', 'Advanced']
 ]
 const HOUR = 3600e3; const MIN = 60e3
@@ -59,6 +59,11 @@ const render = {
       button('Site permissions & notifications', 'Camera, microphone, location, notifications…', 'Show', () => go('privacy')),
       button('Clear browsing data', 'History, cookies, cache and site data', 'Clear…', () => act('clear-data'), 'danger'))
   ],
+  spaces: () => [
+    note('Each space has its own colours and icon. Pick a preset or mix up to three colours, choose light, dark or automatic, and add grain for that Arc-style texture.'),
+    ...D.spaces.map(spaceCard),
+    el('div', { class: 'row plain' }, el('button', { class: 'b', onclick: () => act('space-new') }, '＋ New Space'))
+  ],
   tidy: () => [
     note('Tidy features run entirely on your Mac — nothing is sent to an AI service.'),
     card(toggle('tidyTabs', 'Tidy Tabs', 'Shows a ✧ Tidy button when you have more than six Today tabs: groups them by site and archives duplicates'),
@@ -73,7 +78,8 @@ const render = {
     card(toggle('miniHotkey', 'Open a Little Window when I press ⌥⌘N in any app'),
       toggle('miniForExternal', 'Links from other apps open in a Little Window')),
     card(toggle('peekShift', 'Open Peek when clicking links with Shift held'),
-      toggle('peekFromPinned', 'Open Peek for links to other sites', 'Only affects Favorites and Pinned tabs'))
+      toggle('peekFromPinned', 'Open Peek for links to other sites', 'Only affects Favorites and Pinned tabs')),
+    card(toggle('favPreviews', 'Preview Favorites on hover', 'Gmail shows your latest emails with a compose button; other sites show how the page last looked'))
   ],
   privacy: () => [
     sec('Blocking'),
@@ -124,8 +130,52 @@ const render = {
       toggle('pipOnAppSwitch', 'Picture in Picture when you switch to another app', 'The floating video stays on top of other apps; it returns to the page when you come back'),
       toggle('boostsEnabled', 'Enable Boosts on websites you visit', 'Per-site styles — run “Boost This Site” from the command bar'),
       select('memorySaverMs', 'Memory Saver: unload inactive tabs after', [[15 * MIN, '15 minutes'], [30 * MIN, '30 minutes'], [HOUR, '1 hour'], [4 * HOUR, '4 hours'], [0, 'Never']], 'Frees memory from background tabs; they reload when you return')),
-    el('div', { class: 'row' }, el('button', { class: 'b', onclick: () => act('export-data') }, 'Export Data…'), el('span', { style: 'flex:1' }), el('button', { class: 'b danger', onclick: () => act('reset-perms') }, 'Reset All Site Permissions'))
+    el('div', { class: 'row' }, el('button', { class: 'b', onclick: () => act('export-data') }, 'Export Data…'), el('span', { class: 'flex' }), el('button', { class: 'b danger', onclick: () => act('reset-perms') }, 'Reset All Site Permissions'))
   ]
+}
+const EMOJI = ['💼', '🏠', '⭐', '📚', '💻', '🎮', '🎵', '🎨', '🧪', '🛒', '✈️', '🔒', '🌱', '🔥', '💡', '📈']
+const upd = (id, patch) => act('space-update', id, patch)
+function gradientCss (th) {
+  const c = th.colors
+  return c.length === 1 ? `linear-gradient(135deg, ${c[0]}, color-mix(in srgb, ${c[0]} 55%, #fff))` : `linear-gradient(135deg, ${c.join(', ')})`
+}
+function spaceCard (sp) {
+  const th = sp.theme
+  const preview = el('div', { class: 'preview' }, el('span', { class: 'pv-icon' }, sp.icon || '•'), el('b', {}, sp.name), sp.profile ? el('small', {}, sp.profile) : null)
+  preview.style.background = gradientCss(th)
+  if (th.mode === 'dark') preview.classList.add('dark')
+  const name = el('input', { type: 'text', value: sp.name, maxlength: '40' }); name.onchange = () => upd(sp.id, { name: name.value })
+  const icon = el('input', { type: 'text', value: sp.icon, class: 'emoji', placeholder: '🙂', maxlength: '8' }); icon.onchange = () => upd(sp.id, { icon: icon.value })
+  const picks = el('div', { class: 'emojis' }, ...EMOJI.map(e => el('button', { class: 'em' + (sp.icon === e ? ' on' : ''), onclick: () => upd(sp.id, { icon: e }) }, e)),
+    el('button', { class: 'em', title: 'No icon', onclick: () => upd(sp.id, { icon: '' }) }, '∅'))
+  const presets = el('div', { class: 'swatches' }, ...D.themePresets.map(([n, cols]) => {
+    const b = el('button', { class: 'sw-btn' + (JSON.stringify(cols) === JSON.stringify(th.colors) ? ' on' : ''), title: n, onclick: () => upd(sp.id, { theme: { colors: cols } }) })
+    b.style.background = gradientCss({ colors: cols }); return b
+  }))
+  const colourInputs = el('div', { class: 'colours' }, ...th.colors.map((c, i) => {
+    const inp = el('input', { type: 'color', value: c, title: 'Colour ' + (i + 1) })
+    inp.oninput = () => { const colors = [...th.colors]; colors[i] = inp.value; preview.style.background = gradientCss({ colors }) }
+    inp.onchange = () => { const colors = [...th.colors]; colors[i] = inp.value; upd(sp.id, { theme: { colors } }) }
+    return inp
+  }),
+  th.colors.length < 3 ? el('button', { class: 'b small', onclick: () => upd(sp.id, { theme: { colors: [...th.colors, th.colors[th.colors.length - 1]] } }) }, '＋ Colour') : null,
+  th.colors.length > 1 ? el('button', { class: 'b small', onclick: () => upd(sp.id, { theme: { colors: th.colors.slice(0, -1) } }) }, '− Colour') : null)
+  const mode = el('div', { class: 'seg' }, ...[['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([v, t]) => el('button', { class: th.mode === v ? 'on' : '', onclick: () => upd(sp.id, { theme: { mode: v } }) }, t)))
+  const grain = el('input', { type: 'checkbox' }); grain.checked = th.grain; grain.onchange = () => upd(sp.id, { theme: { grain: grain.checked } })
+  const inten = el('input', { type: 'range', min: '20', max: '100', value: String(Math.round(th.intensity * 100)) })
+  inten.onchange = () => upd(sp.id, { theme: { intensity: Number(inten.value) / 100 } })
+  const c = card(
+    el('div', { class: 'row' }, preview),
+    el('div', { class: 'row' }, label('Name'), name, sp.active ? null : el('button', { class: 'b', onclick: () => act('space-switch', sp.id) }, 'Switch To')),
+    el('div', { class: 'row col' }, el('div', { class: 'row-head' }, label('Icon'), icon), picks),
+    el('div', { class: 'row col' }, label('Theme presets'), presets),
+    el('div', { class: 'row' }, label('Colours', 'Up to three — they blend into a gradient'), colourInputs),
+    el('div', { class: 'row' }, label('Appearance'), mode),
+    el('div', { class: 'row' }, label('Colour intensity'), inten),
+    el('div', { class: 'row' }, label('Grain', 'Subtle paper-like texture'), el('label', { class: 'sw' }, grain, el('span')))
+  )
+  c.id = 'space-' + sp.id
+  return c
 }
 function textRow (key, t, ph) {
   const i = el('input', { type: 'text', placeholder: ph }); i.value = D.settings[key] || ''
@@ -142,5 +192,9 @@ function draw () {
   $('#page').replaceChildren(...render[current]())
   scrollTo(0, y)
 }
-api.on('settings', (d) => { D = d; if (d.page) current = d.page; draw() })
+api.on('settings', (d) => {
+  D = d; if (d.page) current = d.page
+  draw()
+  if (d.focusSpace) document.getElementById('space-' + d.focusSpace)?.scrollIntoView({ block: 'start' })
+})
 api.send('settings-ready')

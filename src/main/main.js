@@ -49,6 +49,23 @@ const ENGINES = {
   brave: { name: 'Brave Search', url: 'https://search.brave.com/search?q=%s', suggest: 'https://search.brave.com/api/suggest?q=%s' }
 }
 
+// Space themes (Arc-style): 1–3 colour gradient, light / dark / auto, grain, intensity
+const THEME_PRESETS = [
+  ['Lavender', ['#b9a7ff', '#f2b6d8']], ['Lagoon', ['#9fb3cc', '#79c3c0']], ['Sunset', ['#ffb48a', '#ff7aa2']],
+  ['Mint', ['#9fe3c1', '#c9f0a6']], ['Sky', ['#9cc9ff', '#c4b5ff']], ['Peach', ['#ffd3b0', '#ffb3c4']],
+  ['Lemon', ['#fff0a3', '#ffcf7a']], ['Rose', ['#ff9fb4']], ['Aurora', ['#7c5cff', '#2bb3a3', '#ff6b8b']],
+  ['Forest', ['#4f8a68', '#a9cc8f']], ['Midnight', ['#2d2f7a', '#7041a8']], ['Graphite', ['#8e9196']]
+]
+const defaultTheme = (color) => ({ colors: [color || COLORS[0]], mode: 'auto', grain: true, intensity: 0.6 })
+function cleanTheme (t, fallback) {
+  const colors = Array.isArray(t?.colors) ? t.colors.filter(c => /^#[0-9a-f]{6}$/i.test(c)).slice(0, 3) : []
+  return {
+    colors: colors.length ? colors : [fallback || COLORS[0]],
+    mode: ['auto', 'light', 'dark'].includes(t?.mode) ? t.mode : 'auto',
+    grain: t?.grain !== false,
+    intensity: Math.max(0.2, Math.min(1, Number(t?.intensity) || 0.6))
+  }
+}
 const uid = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
 
 const DEFAULTS = {
@@ -83,6 +100,7 @@ const DEFAULTS = {
     peekFromPinned: true,
     pipOnLeave: true,
     pipOnAppSwitch: true,
+    favPreviews: true,
     boostsEnabled: true,
     icon: 'aurora',
     mcpEnabled: false,
@@ -93,8 +111,9 @@ const DEFAULTS = {
   },
   boosts: {},
   profiles: [{ id: 'default', name: 'Personal', favorites: [] }],
-  spaces: [{ id: 'home', name: 'Home', color: COLORS[0], profileId: 'default', pinned: [], today: [], activeTabId: null, split: null }],
+  spaces: [{ id: 'home', name: 'Home', icon: '', color: COLORS[0], theme: defaultTheme(COLORS[0]), profileId: 'default', pinned: [], today: [], activeTabId: null, split: null }],
   tabs: {},
+  folders: {},
   archive: [],
   history: [],
   permissions: {},
@@ -115,7 +134,9 @@ const views = new Map() // tabId -> WebContentsView
 const wcToTab = new Map() // webContents.id -> tabId
 const live = new Map() // tabId -> { loading, canBack, canFwd, blocked, audible, muted }
 const recentlyClosed = []
-const downloads = []
+const downloads = [] // persisted as S.downloads (newest first)
+const activeDownloads = new Map() // id -> DownloadItem
+const downloadThumbs = new Map() // id -> data URL (Quick Look thumbnail or file icon)
 const httpFallbackHosts = new Set()
 const upgradedHosts = new Set()
 const configuredSessions = new Set()
@@ -129,8 +150,11 @@ const tab = (id) => S.tabs[id]
 const MAX_SPLIT = 4
 const inSplit = (sp, id) => !!sp?.split && sp.split.ids.includes(id)
 
+// Pinned folders: sp.pinned holds tab ids and folder ids; S.folders[fid] = { id, name, open, items: [tabIds] }
+const pinnedTabs = (sp) => sp.pinned.flatMap(id => S.folders[id] ? S.folders[id].items : [id])
 function locate (tabId) {
   for (const sp of S.spaces) {
+    for (const fid of sp.pinned) if (S.folders[fid]?.items.includes(tabId)) return { type: 'pinned', space: sp, list: S.folders[fid].items, folder: fid }
     if (sp.pinned.includes(tabId)) return { type: 'pinned', space: sp, list: sp.pinned }
     if (sp.today.includes(tabId)) return { type: 'today', space: sp, list: sp.today }
   }
@@ -232,7 +256,7 @@ function setupSession (ses, { extensions = true } = {}) {
       }
       return cb({})
     }
-    if (S.settings.blocker) {
+    if (S.settings.blocker && !siteFlag(wcToTab.get(details.webContentsId), 'noBlock')) {
       const tabId = wcToTab.get(details.webContentsId)
       const verdict = adblock.match(details, tab(tabId)?.url) || (isBlockedHost(u.hostname) ? { cancel: true } : null)
       if (verdict) {
@@ -254,39 +278,46 @@ function setupSession (ses, { extensions = true } = {}) {
   })
 
   ses.on('will-download', (_e, item, wc) => {
-    const dir = S.settings.downloadMode === 'custom' && S.settings.downloadDir && fs.existsSync(S.settings.downloadDir) ? S.settings.downloadDir : app.getPath('downloads')
+    const dir = downloadDir()
     let name = item.getFilename().replace(/[/\\]/g, '_')
     const tidied = S.settings.tidyDownloads ? tidyDownloadName(name, wc && !wc.isDestroyed() ? (tab(wcToTab.get(wc.id))?.title || wc.getTitle()) : '') : null
     if (tidied) { toast(`Download renamed to ${tidied}`); name = tidied }
-    if (S.settings.downloadMode === 'ask') {
-      item.setSaveDialogOptions({ defaultPath: path.join(dir, name) })
-      const d = { id: uid('d'), name, path: '', received: 0, total: item.getTotalBytes(), state: 'progressing' }
-      downloads.unshift(d)
-      item.on('updated', (_e2, state) => { d.received = item.getReceivedBytes(); d.state = state; d.path = item.getSavePath(); d.name = path.basename(d.path || name); pushStateSoon() })
-      item.once('done', (_e2, state) => { d.state = state; d.path = item.getSavePath(); pushState(); if (state === 'completed') toast(`Downloaded ${d.name}`) })
-      return
+    const d = { id: uid('d'), name, path: '', received: 0, total: item.getTotalBytes(), state: 'progressing', startedAt: Date.now() }
+    if (S.settings.downloadMode === 'ask') item.setSaveDialogOptions({ defaultPath: path.join(dir, name) })
+    else {
+      let target = path.join(dir, name)
+      const ext = path.extname(name); const base = path.basename(name, ext)
+      for (let i = 1; fs.existsSync(target); i++) target = path.join(dir, `${base} (${i})${ext}`)
+      item.setSavePath(target); d.path = target; d.name = path.basename(target)
     }
-    let target = path.join(dir, name)
-    const ext = path.extname(name); const base = path.basename(name, ext)
-    for (let i = 1; fs.existsSync(target); i++) target = path.join(dir, `${base} (${i})${ext}`)
-    item.setSavePath(target)
-    const d = { id: uid('d'), name: path.basename(target), path: target, received: 0, total: item.getTotalBytes(), state: 'progressing' }
-    downloads.unshift(d); downloads.length = Math.min(downloads.length, 30)
-    toast(`Downloading ${d.name}`)
-    item.on('updated', (_e2, state) => { d.received = item.getReceivedBytes(); d.state = state; pushStateSoon() })
+    downloads.unshift(d); if (downloads.length > 60) downloads.length = 60
+    activeDownloads.set(d.id, item)
+    toast(`Downloading ${d.name}`); pushState()
+    item.on('updated', (_e2, state) => {
+      d.received = item.getReceivedBytes(); d.total = item.getTotalBytes(); d.state = item.isPaused() ? 'paused' : state
+      if (!d.path && item.getSavePath()) { d.path = item.getSavePath(); d.name = path.basename(d.path) }
+      pushStateSoon()
+    })
     item.once('done', (_e2, state) => {
-      d.state = state; d.received = item.getReceivedBytes()
+      activeDownloads.delete(d.id)
+      d.state = state; d.received = item.getReceivedBytes(); d.doneAt = Date.now()
+      if (item.getSavePath()) { d.path = item.getSavePath(); d.name = path.basename(d.path) }
       if (state === 'completed') {
         toast(`Downloaded ${d.name}`)
-        if (isMac) app.dock?.downloadFinished(target)
+        if (isMac) app.dock?.downloadFinished(d.path)
+        downloadThumb(d)
       } else toast(`Download ${state}: ${d.name}`)
-      pushState()
+      store.save(); pushState()
     })
   })
   ses.setSpellCheckerEnabled(true)
   if (!PRIVATE && extensions) setupExtensions(ses)
 }
 
+function siteFlag (tabId, flag) {
+  const t = tab(tabId); if (!t || !S.siteFlags) return false
+  try { return !!S.siteFlags[new URL(t.url).hostname]?.[flag] } catch { return false }
+}
 function applyProxy (ses) {
   const st = S.settings
   const cfg = { mode: st.proxyMode || 'system' }
@@ -439,6 +470,7 @@ function ensureView (tabId) {
 }
 
 function destroyView (tabId) {
+  if (!locate(tabId)) snapshots.delete(tabId)
   const view = views.get(tabId)
   if (!view) return
   try { win.contentView.removeChildView(view) } catch {}
@@ -465,7 +497,7 @@ function wireWebContents (tabId, wc) {
     const boost = boostFor(url); if (boost) wc.insertCSS(boost, { cssOrigin: 'user' }).catch(() => {})
   })
   wc.once('destroyed', () => inspector.forget(wc.id))
-  wc.on('did-stop-loading', () => { if (st()) st().loading = false; updateNav() })
+  wc.on('did-stop-loading', () => { if (st()) st().loading = false; updateNav(); setTimeout(() => snapshotTab(tabId), 1200) })
   wc.on('did-navigate', (_e, url) => {
     if (url.startsWith('file:')) return updateNav() // our error page
     if (t()) { t().url = url; store.save() }
@@ -533,6 +565,7 @@ function wireWebContents (tabId, wc) {
   })
   wc.setWindowOpenHandler(({ url, disposition, features }) => {
     if (!isSafeWebUrl(url)) return { action: 'deny' }
+    if (disposition === 'new-window' && features && siteFlag(tabId, 'noPopups')) { toast('Pop-up blocked'); return { action: 'deny' } }
     if (disposition === 'new-window' && features) {
       // Real popups (OAuth, payments) keep window.opener; they run sandboxed in the same profile.
       return {
@@ -627,6 +660,9 @@ function activateTab (tabId) {
   if (loc?.space && loc.space.id !== S.activeSpaceId) S.activeSpaceId = loc.space.id
   const sp = space()
   const prev = sp.activeTabId
+  if (prev && prev !== tabId) snapshotTab(prev)
+  hideFavPreview()
+  if (popoverOpen) closePopover()
   if (S.settings.pipOnLeave && prev && prev !== tabId && views.has(prev) && !(inSplit(sp, prev) && inSplit(sp, tabId))) popOutVideo(prev, { auto: true })
   if (pip?.auto && pip.tabId === tabId) returnVideo(tabId)
 
@@ -662,7 +698,7 @@ function closeTab (tabId, { archive = true } = {}) {
     recentlyClosed.push({ url: t.url, title: t.title, spaceId: sp.id })
     if (archive) archiveEntry(t, sp.id)
     delete S.tabs[tabId]
-    if (sp.activeTabId === tabId) sp.activeTabId = sp.today[Math.min(idx, sp.today.length - 1)] || sp.pinned[0] || null
+    if (sp.activeTabId === tabId) sp.activeTabId = sp.today[Math.min(idx, sp.today.length - 1)] || pinnedTabs(sp)[0] || null
   }
   const now = space().activeTabId
   if (now) activateTab(now); else { layout(); pushState() }
@@ -670,7 +706,7 @@ function closeTab (tabId, { archive = true } = {}) {
 }
 
 function pickNeighbor (sp, tabId) {
-  const all = [...profile(sp.profileId).favorites, ...sp.pinned, ...sp.today].filter(id => id !== tabId && views.has(id))
+  const all = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...sp.today].filter(id => id !== tabId && views.has(id))
   return all[0] || sp.today[0] || null
 }
 
@@ -729,7 +765,7 @@ function clearToday () {
   store.save()
 }
 
-function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId } = {}) {
+function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId, folderId = null } = {}) {
   const t = tab(tabId)
   const loc = locate(tabId)
   if (!t || !loc) return
@@ -737,11 +773,13 @@ function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId } = {}) {
   const oldProfile = profileIdOfTab(tabId)
   loc.list.splice(loc.list.indexOf(tabId), 1)
   let list
-  if (to === 'favorite') list = profile(sp.profileId).favorites
+  if (to === 'folder') { if (!S.folders[folderId] || !sp.pinned.includes(folderId)) { loc.list.push(tabId); return } list = S.folders[folderId].items; S.folders[folderId].open = true }
+  else if (to === 'favorite') list = profile(sp.profileId).favorites
   else if (to === 'pinned') list = sp.pinned
   else list = sp.today
   if (index < 0 || index > list.length) index = to === 'today' && loc.type !== 'today' ? 0 : list.length
   list.splice(index, 0, tabId)
+  if (to === 'folder') to = 'pinned'
   t.pinnedUrl = to === 'today' ? undefined : (t.pinnedUrl || t.url)
   if (to !== 'today' && loc.type === 'today' && S.settings.tidyTitles && !t.customTitle) t.customTitle = tidyTitle(t.title, t.url)
   if (to === 'today') delete t.customTitle
@@ -752,6 +790,28 @@ function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId } = {}) {
   store.save(); layout(); pushState()
 }
 
+function newFolder () {
+  const sp = space(); const fid = uid('f')
+  S.folders[fid] = { id: fid, name: 'New Folder', open: true, items: [] }
+  sp.pinned.unshift(fid); store.save(); pushState()
+  prompt('Name this folder', 'New Folder', (n) => { if (n && S.folders[fid]) { S.folders[fid].name = n.slice(0, 60); store.save(); pushState() } })
+  return fid
+}
+function deleteFolder (fid) {
+  const f = S.folders[fid]; if (!f) return
+  for (const sp of S.spaces) { const i = sp.pinned.indexOf(fid); if (i >= 0) sp.pinned.splice(i, 1, ...f.items) }
+  delete S.folders[fid]; store.save(); pushState()
+}
+function folderMenu (fid) {
+  const f = S.folders[fid]; if (!f) return
+  Menu.buildFromTemplate([
+    { label: 'Rename Folder…', click: () => prompt('Rename folder', f.name, (n) => { if (n) { f.name = n.slice(0, 60); store.save(); pushState() } }) },
+    { label: f.open === false ? 'Expand' : 'Collapse', click: () => { f.open = f.open === false; store.save(); pushState() } },
+    { label: 'Unload All Tabs in Folder', enabled: f.items.some(id => views.has(id)), click: () => { for (const id of f.items) closeTab(id) } },
+    { type: 'separator' },
+    { label: 'Delete Folder (keep its tabs)', click: () => deleteFolder(fid) }
+  ]).popup({ window: win })
+}
 function togglePin (tabId = activeTabId()) {
   const loc = locate(tabId); if (!loc) return
   moveTab(tabId, loc.type === 'pinned' ? 'today' : 'pinned')
@@ -827,7 +887,8 @@ function createSpace (name, { newProfile = false } = {}) {
     S.profiles.push({ id: profileId, name, favorites: [] })
   }
   const id = uid('s')
-  S.spaces.push({ id, name, color: COLORS[S.spaces.length % COLORS.length], profileId, pinned: [], today: [], activeTabId: null, split: null })
+  const preset = THEME_PRESETS[S.spaces.length % THEME_PRESETS.length][1]
+  S.spaces.push({ id, name, icon: '', color: preset[0], theme: { ...defaultTheme(), colors: [...preset] }, profileId, pinned: [], today: [], activeTabId: null, split: null })
   switchSpace(id)
 }
 
@@ -842,7 +903,8 @@ function switchSpace (id) {
 function deleteSpace (id = S.activeSpaceId) {
   if (S.spaces.length <= 1) return toast('You need at least one space')
   const sp = space(id)
-  for (const tid of [...sp.pinned, ...sp.today]) { destroyView(tid); archiveEntry(tab(tid), id); delete S.tabs[tid] }
+  for (const tid of [...pinnedTabs(sp), ...sp.today]) { destroyView(tid); archiveEntry(tab(tid), id); delete S.tabs[tid] }
+  for (const fid of sp.pinned) delete S.folders[fid]
   S.spaces = S.spaces.filter(s => s.id !== id)
   S.sync.tombstones[id] = Date.now()
   // drop profiles no space uses any more (keep its data on disk)
@@ -1008,7 +1070,7 @@ function paletteSnapshot () {
   const sp = space()
   const tabs = []
   for (const s of S.spaces) {
-    for (const id of [...s.pinned, ...s.today]) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: s.name }) }
+    for (const id of [...pinnedTabs(s), ...s.today]) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: s.name }) }
   }
   for (const id of profile(sp.profileId).favorites) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: 'Favorites' }) }
   return {
@@ -1042,10 +1104,12 @@ const COMMANDS = [
   { id: 'archive', title: 'Show Archived Tabs', run: () => setTimeout(() => openOverlay({ mode: 'archive', query: '' })) },
   { id: 'find', title: 'Find in Page', keys: '⌘F', run: () => setTimeout(findInPage) },
   { id: 'sidebar', title: 'Toggle Sidebar', keys: '⌘S', run: toggleSidebar },
+  { id: 'new-folder', title: 'New Folder (pinned tabs)', run: () => newFolder() },
+  { id: 'downloads-panel', title: 'Show Downloads', run: () => { downloadsOpen = true; pushState(); LATE_ACTIONS['dl-thumbs']() } },
   { id: 'new-space', title: 'New Space…', run: () => setTimeout(() => prompt('Name your new space', '', (n) => n && createSpace(n))) },
   { id: 'new-profile-space', title: 'New Space with New Profile…', run: () => setTimeout(() => prompt('Name the new profile & space', '', (n) => n && createSpace(n, { newProfile: true }))) },
   { id: 'rename-space', title: 'Rename Space…', run: () => setTimeout(() => renameSpace()) },
-  { id: 'space-color', title: 'Change Space Colour…', run: () => setTimeout(() => pickColor()) },
+  { id: 'space-color', title: 'Edit Space Theme & Icon…', run: () => openSettings('spaces', S.activeSpaceId) },
   { id: 'space-profile', title: 'Change Space Profile…', run: () => setTimeout(() => pickProfile()) },
   { id: 'delete-space', title: 'Delete Space', run: () => confirmDeleteSpace() },
   { id: 'next-space', title: 'Next Space', keys: '⌘⌥→', run: () => stepSpace(1) },
@@ -1217,6 +1281,7 @@ async function inFrames (wc, code) {
 }
 async function popOutVideo (tabId, { auto = false } = {}) {
   const v = views.get(tabId); if (!v || v.webContents.isDestroyed()) return false
+  if (auto && siteFlag(tabId, 'noPip')) return false
   const ok = await inFrames(v.webContents, PIP_IN)
   if (ok) pip = { tabId, auto }
   return ok
@@ -1226,6 +1291,297 @@ async function returnVideo (tabId) {
   if (v && !v.webContents.isDestroyed()) await inFrames(v.webContents, PIP_OUT)
   if (pip?.tabId === tabId) pip = null
 }
+
+// ---------------------------------------------------------------- Favourite hover previews
+// Hover a Favorite tile: Gmail shows your latest emails (+ compose); other sites show a snapshot.
+// Everything is read locally from the tab you're already signed into.
+let previewView = null; let previewFor = null; let previewTimer = null
+const snapshots = new Map() // tabId -> data URL of how the page last looked
+const PREVIEW_W = 340; const PREVIEW_H = 420
+function ensurePreviewView () {
+  if (previewView) return previewView
+  previewView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+  previewView.setBackgroundColor('#00000000')
+  previewView.setBorderRadius?.(14)
+  previewView.webContents.loadFile(path.join(UI_DIR, 'fav-preview.html'))
+  previewView.webContents.on('will-navigate', e => e.preventDefault())
+  previewView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  return previewView
+}
+function sendPreview (data) {
+  const wc = previewView.webContents
+  if (wc.isLoading()) wc.once('did-finish-load', () => wc.send('preview', data)); else wc.send('preview', data)
+}
+const hostOf = (u) => { try { return new URL(u).hostname } catch { return '' } }
+async function snapshotTab (tabId) {
+  const v = views.get(tabId); const loc = locate(tabId)
+  if (!v || !loc || loc.type !== 'favorite' || v.webContents.isDestroyed() || !win.contentView.children.includes(v)) return
+  try {
+    const img = await v.webContents.capturePage()
+    if (!img.isEmpty()) snapshots.set(tabId, img.resize({ width: PREVIEW_W * 2 }).toDataURL())
+  } catch {}
+}
+const GMAIL_SCRAPE = `(() => [...document.querySelectorAll('tr.zA')].slice(0, 10).map((r, i) => ({
+  i,
+  from: ((r.querySelector('.yW [email]') || r.querySelector('.yW')) || {}).innerText?.trim() || '',
+  subject: (r.querySelector('.bog') || {}).innerText?.trim() || '',
+  snippet: ((r.querySelector('.y2') || {}).innerText || '').replace(/^\\s*[-–]\\s*/, '').trim(),
+  date: ((r.querySelector('.xW [title]') || r.querySelector('.xW')) || {}).innerText?.trim() || '',
+  unread: r.classList.contains('zE')
+})))()`
+async function scrapeGmail (wc) {
+  try { return await wc.executeJavaScriptInIsolatedWorld(997, [{ code: GMAIL_SCRAPE }]) } catch { return [] }
+}
+async function previewData (tabId) {
+  const t = tab(tabId); if (!t) return null
+  const base = { id: tabId, title: t.customTitle || t.title, url: t.url, favicon: iconFor(t) }
+  const v = views.get(tabId)
+  if (v && hostOf(t.url) === 'mail.google.com') {
+    const items = await scrapeGmail(v.webContents)
+    if (items?.length) return { ...base, kind: 'list', items, compose: true }
+  }
+  if (snapshots.has(tabId)) return { ...base, kind: 'snapshot', image: snapshots.get(tabId) }
+  return { ...base, kind: 'info', compose: hostOf(t.url) === 'mail.google.com' }
+}
+async function showFavPreview (tabId, rect) {
+  if (!S.settings.favPreviews || overlayOpen || !tab(tabId) || !rect) return
+  clearTimeout(previewTimer)
+  previewFor = tabId
+  ensurePreviewView()
+  const [w, h] = win.getContentSize()
+  const x = Math.max(8, Math.min(Math.round(rect.x + rect.width * 0.45), w - PREVIEW_W - 8))
+  const y = Math.max(8, Math.min(Math.round(rect.y + rect.height + 4), h - PREVIEW_H - 8))
+  win.contentView.addChildView(previewView)
+  previewView.setBounds({ x, y, width: PREVIEW_W, height: PREVIEW_H })
+  const t = tab(tabId)
+  // Gmail favourites that aren't loaded yet are loaded in the background so the inbox can be shown
+  if (!views.has(tabId) && hostOf(t.url) === 'mail.google.com') {
+    sendPreview({ id: tabId, title: t.title, url: t.url, favicon: iconFor(t), kind: 'info', loading: true })
+    const wc = ensureView(tabId).webContents
+    await new Promise(r => { const done = () => setTimeout(r, 1500); if (wc.isLoading()) wc.once('did-stop-loading', done); else done(); setTimeout(r, 12000) })
+  }
+  const data = await previewData(tabId)
+  if (previewFor === tabId && data) sendPreview(data)
+}
+function hideFavPreview (delay = 0) {
+  clearTimeout(previewTimer)
+  previewTimer = setTimeout(() => {
+    previewFor = null
+    if (previewView) { try { win.contentView.removeChildView(previewView) } catch {} }
+  }, delay)
+}
+Object.assign(LATE_ACTIONS, {
+  'fav-hover': (id, rect) => showFavPreview(id, rect && { x: +rect.x, y: +rect.y, width: +rect.width, height: +rect.height }),
+  'fav-hover-end': () => hideFavPreview(280),
+  'preview-hold': () => clearTimeout(previewTimer),
+  'preview-release': () => hideFavPreview(200),
+  'preview-open': async (id, i) => {
+    hideFavPreview(); if (!tab(id)) return
+    activateTab(id)
+    if (Number.isInteger(i) && i >= 0) views.get(id)?.webContents.executeJavaScriptInIsolatedWorld(997, [{ code: `document.querySelectorAll('tr.zA')[${i}]?.click()` }]).catch(() => {})
+  },
+  'preview-compose': () => {
+    const id = previewFor; hideFavPreview(); if (!id || !tab(id)) return
+    activateTab(id)
+    views.get(id)?.webContents.loadURL('https://mail.google.com/mail/u/0/#inbox?compose=new').catch(() => {})
+  }
+})
+
+// ---------------------------------------------------------------- Downloads panel
+function downloadDir () {
+  return S.settings.downloadMode === 'custom' && S.settings.downloadDir && fs.existsSync(S.settings.downloadDir) ? S.settings.downloadDir : app.getPath('downloads')
+}
+async function downloadThumb (d) {
+  if (downloadThumbs.has(d.id) || d.state !== 'completed' || !d.path || !fs.existsSync(d.path)) return
+  let img = null
+  try { if (isMac || process.platform === 'win32') img = await nativeImage.createThumbnailFromPath(d.path, { width: 128, height: 128 }) } catch {}
+  try { if ((!img || img.isEmpty()) && /\.(png|jpe?g|gif|webp|bmp)$/i.test(d.path)) img = nativeImage.createFromPath(d.path).resize({ width: 128 }) } catch {}
+  try { if (!img || img.isEmpty()) img = await app.getFileIcon(d.path, { size: 'large' }) } catch {}
+  if (img && !img.isEmpty()) { downloadThumbs.set(d.id, img.toDataURL()); win?.webContents.send('dl-thumb', d.id, downloadThumbs.get(d.id)) }
+}
+const findDownload = (id) => downloads.find(d => d.id === id)
+function downloadMenu (id) {
+  const d = findDownload(id); if (!d) return
+  const item = activeDownloads.get(id); const exists = !!d.path && fs.existsSync(d.path)
+  Menu.buildFromTemplate([
+    ...(item ? [
+      { label: item.isPaused() ? 'Resume' : 'Pause', click: () => { item.isPaused() ? item.resume() : item.pause(); d.state = item.isPaused() ? 'paused' : 'progressing'; pushState() } },
+      { label: 'Cancel Download', click: () => item.cancel() },
+      { type: 'separator' }] : []),
+    { label: 'Open', enabled: d.state === 'completed' && exists, click: () => shell.openPath(d.path) },
+    { label: isMac ? 'Show in Finder' : 'Show in Folder', enabled: exists, click: () => shell.showItemInFolder(d.path) },
+    { label: 'Copy Path', enabled: !!d.path, click: () => clipboard.writeText(d.path) },
+    { type: 'separator' },
+    { label: 'Remove from List', enabled: !item, click: () => { downloads.splice(downloads.indexOf(d), 1); store.save(); pushState() } },
+    { label: 'Move to Trash', enabled: !item && exists, click: async () => { await shell.trashItem(d.path).catch(() => {}); downloads.splice(downloads.indexOf(d), 1); store.save(); pushState() } }
+  ]).popup({ window: win })
+}
+Object.assign(LATE_ACTIONS, {
+  'dl-open': (id) => {
+    const d = findDownload(id); if (!d) return
+    if (d.state === 'completed' && d.path && fs.existsSync(d.path)) shell.openPath(d.path)
+    else if (d.path && fs.existsSync(d.path)) shell.showItemInFolder(d.path)
+    else toast('That file was moved or deleted')
+  },
+  'dl-menu': (id) => downloadMenu(id),
+  'dl-drag': (id) => {
+    const d = findDownload(id); if (!d || d.state !== 'completed' || !d.path || !fs.existsSync(d.path) || !uiSender) return
+    const thumb = downloadThumbs.get(id)
+    const icon = thumb ? nativeImage.createFromDataURL(thumb).resize({ width: 64 }) : nativeImage.createFromPath(path.join(UI_DIR, 'icons', 'aurora.png')).resize({ width: 48 })
+    uiSender.startDrag({ file: d.path, icon })
+  },
+  'dl-thumbs': () => { for (const d of downloads.slice(0, 40)) { if (downloadThumbs.has(d.id)) win.webContents.send('dl-thumb', d.id, downloadThumbs.get(d.id)); else downloadThumb(d) } },
+  'dl-clear': () => { for (let i = downloads.length - 1; i >= 0; i--) if (!activeDownloads.has(downloads[i].id)) downloads.splice(i, 1); store.save(); pushState() },
+  'dl-folder': () => shell.openPath(downloadDir()),
+  'dl-toggle': () => { downloadsOpen = !downloadsOpen; pushState() }
+})
+let downloadsOpen = false
+
+// ---------------------------------------------------------------- Popovers: + menu and site controls
+let popView = null; let popItems = null
+function ensurePopView () {
+  if (popView) return popView
+  popView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+  popView.setBackgroundColor('#00000000')
+  popView.webContents.loadFile(path.join(UI_DIR, 'popover.html'))
+  popView.webContents.on('will-navigate', e => e.preventDefault())
+  popView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  return popView
+}
+function openPopover (data) {
+  ensurePopView()
+  const [w, h] = win.getContentSize()
+  win.contentView.addChildView(popView); popView.setBounds({ x: 0, y: 0, width: w, height: h })
+  const wc = popView.webContents
+  const send = () => { wc.send('popover', data); wc.focus() }
+  if (wc.isLoading()) wc.once('did-finish-load', send); else send()
+  popoverOpen = data.kind; pushState()
+}
+let popoverOpen = null
+function closePopover () {
+  if (popView) { try { win.contentView.removeChildView(popView) } catch {} }
+  popoverOpen = null; popItems = null; pushState()
+}
+const PLUS_ITEMS = [
+  { id: 'new-space', label: 'New Space', icon: 'spaces' },
+  { id: 'new-folder', label: 'New Folder', icon: 'folder' },
+  '-',
+  { id: 'boost', label: 'New Boost', icon: 'boost' },
+  '-',
+  { id: 'split', label: 'New Split', icon: 'split', keys: '⌃⇧=' },
+  { id: 'new-tab', label: 'New Tab', icon: 'newtab', keys: '⌘T' }
+]
+function plusMenu (anchor) {
+  if (popoverOpen) return closePopover()
+  popItems = PLUS_ITEMS
+  openPopover({ kind: 'menu', anchor, place: 'above', items: PLUS_ITEMS })
+}
+// Per-site permissions shown in the site-controls popover (key → label)
+const SITE_PERMS = [
+  ['media', 'Camera & Microphone'], ['geolocation', 'Location'], ['notifications', 'Notifications'],
+  ['display-capture', 'Screen Sharing'], ['clipboard-read', 'Clipboard'], ['midi', 'MIDI Devices']
+]
+function siteControlsData () {
+  const id = activeTabId(); const t = tab(id); if (!t) return null
+  let u; try { u = new URL(t.url) } catch { return null }
+  const o = u.origin; const host = u.hostname; const saved = S.permissions[o] || {}
+  const ses = getSession(profileIdOfTab(id))
+  const exts = PRIVATE ? [] : (ses.extensions || ses).getAllExtensions().map(e => ({ id: e.id, name: e.name, icon: extIcon(e) }))
+  return {
+    kind: 'site', host, secure: u.protocol === 'https:', blocked: live.get(id)?.blocked || 0,
+    extensions: exts,
+    settings: [
+      ...SITE_PERMS.map(([k, label]) => ({ key: k, label, value: saved[k] || 'ask' })),
+      { key: 'pip', label: 'Automatic Picture-in-Picture', value: S.siteFlags?.[host]?.noPip ? 'block' : 'allow' },
+      { key: 'popups', label: 'Pop-ups', value: S.siteFlags?.[host]?.noPopups ? 'block' : 'allow' },
+      { key: 'adblock', label: 'Ad & Tracker Blocking', value: !S.settings.blocker ? 'off' : S.siteFlags?.[host]?.noBlock ? 'off' : 'on' }
+    ]
+  }
+}
+function extIcon (e) {
+  try {
+    const icons = e.manifest?.icons || e.manifest?.action?.default_icon || {}
+    const file = typeof icons === 'string' ? icons : icons[Object.keys(icons).sort((a, b) => b - a)[0]]
+    if (!file) return null
+    const img = nativeImage.createFromPath(path.join(e.path, file))
+    return img.isEmpty() ? null : img.resize({ width: 32 }).toDataURL()
+  } catch { return null }
+}
+function siteControls (anchor) {
+  if (popoverOpen) return closePopover()
+  const data = siteControlsData(); if (!data) return toast('Open a page first')
+  openPopover({ ...data, anchor, place: 'below' })
+}
+function setSiteSetting (key, value) {
+  const t = tab(activeTabId()); if (!t) return
+  let u; try { u = new URL(t.url) } catch { return }
+  const host = u.hostname; S.siteFlags = S.siteFlags || {}
+  if (SITE_PERMS.some(([k]) => k === key)) {
+    const m = { ...(S.permissions[u.origin] || {}) }
+    if (value === 'ask') delete m[key]; else if (value === 'allow' || value === 'block') m[key] = value
+    if (Object.keys(m).length) S.permissions[u.origin] = m; else delete S.permissions[u.origin]
+  } else {
+    const f = { ...(S.siteFlags[host] || {}) }
+    if (key === 'pip') f.noPip = value === 'block'
+    if (key === 'popups') f.noPopups = value === 'block'
+    if (key === 'adblock') { f.noBlock = value === 'off'; if (!S.settings.blocker && value === 'on') S.settings.blocker = true }
+    S.siteFlags[host] = f
+    if (key === 'adblock') views.get(activeTabId())?.webContents.reload()
+  }
+  store.save()
+  popView?.webContents.send('popover', { ...siteControlsData(), anchor: null, refresh: true })
+}
+async function screenshotPage () {
+  const v = views.get(activeTabId()); if (!v) return
+  const img = await v.webContents.capturePage()
+  clipboard.writeImage(img)
+  const file = path.join(downloadDir(), `Screenshot ${new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)}.png`)
+  fs.writeFileSync(file, img.toPNG())
+  const d = { id: uid('d'), name: path.basename(file), path: file, received: 1, total: 1, state: 'completed', startedAt: Date.now(), doneAt: Date.now() }
+  downloads.unshift(d); downloadThumb(d); store.save(); pushState()
+  toast('Screenshot copied and saved to Downloads')
+}
+function shareUrl () {
+  const t = tab(activeTabId()); if (!t) return
+  if (isMac) { try { const { ShareMenu } = require('electron'); new ShareMenu({ urls: [t.url] }).popup({ window: win }); return } catch {} }
+  copyUrl()
+}
+function siteMoreMenu () {
+  const id = activeTabId(); const t = tab(id); const wc = views.get(id)?.webContents
+  Menu.buildFromTemplate([
+    { label: 'Zoom In', click: () => zoom(1) }, { label: 'Zoom Out', click: () => zoom(-1) }, { label: 'Actual Size', click: () => zoom(0) },
+    { type: 'separator' },
+    { label: 'Copy URL', click: () => copyUrl() },
+    { label: 'Pop Out Video', click: () => runCommand('pip') },
+    { label: 'Clear Cookies for This Site', enabled: !!wc, click: async () => { const cs = await wc.session.cookies.get({ url: t.url }); for (const c of cs) await wc.session.cookies.remove(t.url, c.name); toast(`Removed ${cs.length} cookies`) } },
+    { label: 'Reset All Settings for This Site', click: () => { try { const u = new URL(t.url); delete S.permissions[u.origin]; delete S.siteFlags?.[u.hostname]; store.save(); toast('Site settings reset') } catch {} } }
+  ]).popup({ window: win })
+}
+Object.assign(LATE_ACTIONS, {
+  'plus-menu': (rect) => plusMenu(rect),
+  'site-controls': (rect) => siteControls(rect),
+  'popover-close': () => closePopover(),
+  'popover-pick': (id) => {
+    const kind = popoverOpen; closePopover()
+    if (kind === 'menu') {
+      if (id === 'new-space') return runCommand('new-space')
+      if (id === 'new-folder') return newFolder()
+      if (id === 'boost') return boostSite()
+      if (id === 'split') return runCommand('split')
+      if (id === 'new-tab') return commandBar('new')
+    }
+    if (kind === 'site') {
+      if (id === 'share') return shareUrl()
+      if (id === 'boost') return boostSite()
+      if (id === 'screenshot') return screenshotPage()
+      if (id === 'inspect' || id === 'secure') return openInspector()
+      if (id === 'more') return siteMoreMenu()
+      if (id === 'add-ext') return runCommand('ext-store')
+      if (typeof id === 'string' && id.startsWith('ext:')) return manageExtensions()
+    }
+  },
+  'site-setting': (key, value) => setSiteSetting(String(key), String(value))
+})
 
 // ---------------------------------------------------------------- Peek
 let peekView = null
@@ -1534,8 +1890,10 @@ async function openInspector () {
 let settingsWin = null
 let settingsPage = null
 const ICONS = [['aurora', 'Aurora'], ['midnight', 'Midnight'], ['sunrise', 'Sunrise'], ['mono', 'Graphite']]
-function openSettings (page) {
+let settingsSpace = null
+function openSettings (page, spaceId) {
   settingsPage = page || null
+  settingsSpace = spaceId || null
   if (settingsWin && !settingsWin.isDestroyed()) { settingsWin.focus(); sendSettings(); return }
   settingsWin = new BrowserWindow({
     width: 820, height: 720, minWidth: 640, minHeight: 480, title: 'Settings', show: false,
@@ -1555,6 +1913,9 @@ function settingsData () {
   const cfg = { mcpServers: { drift: { command: process.execPath, args: [mcpBridgePath()], env } } }
   return {
     page: settingsPage,
+    focusSpace: settingsSpace,
+    spaces: S.spaces.map(s => ({ id: s.id, name: s.name, icon: s.icon || '', theme: s.theme, profile: profile(s.profileId)?.name, active: s.id === S.activeSpaceId })),
+    themePresets: THEME_PRESETS,
     settings: S.settings,
     version: app.getVersion(),
     chrome: process.versions.chrome,
@@ -1580,7 +1941,12 @@ function settingsData () {
     ]
   }
 }
-function sendSettings () { if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send('settings', settingsData()) }
+function sendSettings () {
+  if (!settingsWin || settingsWin.isDestroyed()) return
+  settingsWin.webContents.send('settings', settingsData())
+  // a requested page / space applies once, when Settings is opened — not on every later refresh
+  if (!settingsWin.webContents.isLoading()) { settingsPage = null; settingsSpace = null }
+}
 const SETTING_TYPES = { searchEngine: 'string', aiProvider: 'string', proxyMode: 'string', proxyRules: 'string', proxyBypass: 'string', proxyPac: 'string', downloadMode: 'string', icon: 'string', claudeMode: 'string', claudeModel: 'string', claudeEffort: 'string', archiveAfterMs: 'number', memorySaverMs: 'number' }
 async function setSetting (key, value) {
   if (!(key in DEFAULTS.settings)) return
@@ -1625,6 +1991,9 @@ const SETTINGS_ACTIONS = {
   extensions: () => { win.focus(); manageExtensions() },
   webstore: () => { win.focus(); runCommand('ext-store') },
   'export-data': () => exportData(),
+  'space-update': (id, patch) => updateSpace(id, patch),
+  'space-switch': (id) => switchSpace(id),
+  'space-new': () => { win.focus(); prompt('Name your new space', '', (n) => { if (n) { createSpace(n); sendSettings() } }) },
   'claude-key': () => promptClaudeKey(),
   'claude-open': () => { win.focus(); toggleChat(true) },
   'claude-signout': () => { win.focus(); signOutClaude() }
@@ -1642,7 +2011,7 @@ async function exportData () {
   const data = {
     exportedAt: new Date().toISOString(),
     profiles: S.profiles.map(p => ({ name: p.name, favorites: tabsOf(p.favorites) })),
-    spaces: S.spaces.map(s => ({ name: s.name, color: s.color, profile: profile(s.profileId)?.name, pinned: tabsOf(s.pinned), today: tabsOf(s.today) })),
+    spaces: S.spaces.map(s => ({ name: s.name, color: s.color, profile: profile(s.profileId)?.name, pinned: tabsOf(pinnedTabs(s)), folders: s.pinned.filter(id => S.folders[id]).map(id => ({ name: S.folders[id].name, tabs: tabsOf(S.folders[id].items) })), today: tabsOf(s.today) })),
     archive: S.archive, history: S.history, boosts: S.boosts, settings: S.settings
   }
   fs.writeFileSync(r.filePath, JSON.stringify(data, null, 2)); toast('Data exported (passwords not included)')
@@ -1685,7 +2054,7 @@ async function mcpCall (name, a) {
   switch (name) {
     case 'list_tabs': {
       const out = []
-      for (const sp of S.spaces) { for (const id of sp.pinned) out.push(tabInfo(id, sp.name, 'pinned')); for (const id of sp.today) out.push(tabInfo(id, sp.name, 'today')) }
+      for (const sp of S.spaces) { for (const id of pinnedTabs(sp)) out.push(tabInfo(id, sp.name, 'pinned')); for (const id of sp.today) out.push(tabInfo(id, sp.name, 'today')) }
       for (const p of S.profiles) for (const id of p.favorites) out.push(tabInfo(id, `favorites (${p.name})`, 'favorite'))
       return out
     }
@@ -1722,15 +2091,21 @@ function runCommand (id) { COMMANDS.find(c => c.id === id)?.run() }
 function renameSpace (id = S.activeSpaceId) {
   prompt('Rename space', space(id).name, (n) => { if (n) { space(id).name = n; store.save(); pushState() } })
 }
-function pickColor (id = S.activeSpaceId) {
-  pick('Space colour', COLORS.map(c => ({ value: c, title: c, color: c })), (c) => { space(id).color = c; store.save(); pushState() })
+function pickColor (id = S.activeSpaceId) { openSettings('spaces', id) }
+// Apply a theme / icon / name change to a space (from Settings → Spaces)
+function updateSpace (id, patch) {
+  const sp = space(id); if (!sp || !patch || typeof patch !== 'object') return
+  if (patch.theme) { sp.theme = cleanTheme({ ...sp.theme, ...patch.theme }, sp.color); sp.color = sp.theme.colors[0] }
+  if (typeof patch.icon === 'string') sp.icon = [...patch.icon.trim()].slice(0, 2).join('')
+  if (typeof patch.name === 'string' && patch.name.trim()) sp.name = patch.name.trim().slice(0, 40)
+  store.save(); pushState(); sendSettings()
 }
 function pickProfile (id = S.activeSpaceId) {
   const items = [...S.profiles.map(p => ({ value: p.id, title: p.name })), { value: '__new', title: '+ New Profile…' }]
   pick('Profile for this space (separate cookies, logins & favourites)', items, (v) => {
     const set = (pid) => {
       const sp = space(id)
-      for (const tid of [...sp.pinned, ...sp.today]) destroyView(tid)
+      for (const tid of [...pinnedTabs(sp), ...sp.today]) destroyView(tid)
       sp.profileId = pid; store.save(); layout(); if (sp.activeTabId) activateTab(sp.activeTabId); pushState()
     }
     if (v === '__new') setTimeout(() => prompt('Profile name', '', (n) => { if (!n) return; const pid = uid('p'); S.profiles.push({ id: pid, name: n, favorites: [] }); set(pid) }))
@@ -1775,7 +2150,7 @@ function tabContextMenu (tabId) {
     { label: 'Copy Link', click: () => copyUrl(tabId) },
     { label: lv?.muted ? 'Unmute' : 'Mute', enabled: !!lv, click: () => toggleMute(tabId) }
   ]
-  if (tab(tabId).pinnedUrl && loc.type !== 'today') tmpl.push({ label: 'Reset to Pinned URL', click: () => { tab(tabId).url = tab(tabId).pinnedUrl; views.get(tabId)?.webContents.loadURL(tab(tabId).pinnedUrl) } })
+  if (tab(tabId).pinnedUrl && loc.type !== 'today') tmpl.push({ label: 'Back to Pinned Page', enabled: drifted(tab(tabId)), click: () => resetPinned(tabId) })
   if (others.length) tmpl.push({ label: 'Move to Space', submenu: others.map(s => ({ label: s.name, click: () => moveTab(tabId, loc.type === 'favorite' ? 'today' : loc.type, { spaceId: s.id }) })) })
   tmpl.push({ type: 'separator' }, { label: loc.type === 'today' ? 'Close Tab' : 'Unload Tab', click: () => closeTab(tabId) })
   if (loc.type === 'today') tmpl.push({ label: 'Close Tabs Below', click: () => { const l = sp.today; for (const id of l.slice(l.indexOf(tabId) + 1)) closeTab(id) } })
@@ -1784,7 +2159,7 @@ function tabContextMenu (tabId) {
 function spaceContextMenu (id) {
   Menu.buildFromTemplate([
     { label: 'Rename…', click: () => renameSpace(id) },
-    { label: 'Change Colour…', click: () => pickColor(id) },
+    { label: 'Edit Theme & Icon…', click: () => openSettings('spaces', id) },
     { label: 'Change Profile…', click: () => pickProfile(id) },
     { type: 'separator' },
     { label: 'Delete Space', enabled: S.spaces.length > 1, click: () => confirmDeleteSpace(id) }
@@ -1798,20 +2173,49 @@ function toggleMute (tabId) {
 // ---------------------------------------------------------------- UI state push
 let pushTimer = null
 function pushStateSoon () { if (!pushTimer) pushTimer = setTimeout(() => { pushTimer = null; pushState() }, 60) }
+// A pinned tab that has navigated away from its pinned page (Arc shows “/ title” and a ↑ back button)
+function drifted (t) {
+  if (!t.pinnedUrl || !t.url) return false
+  try { const a = new URL(t.url); const b = new URL(t.pinnedUrl); return a.origin !== b.origin || a.pathname.replace(/\/$/, '') !== b.pathname.replace(/\/$/, '') } catch { return false }
+}
+function resetPinned (tabId) {
+  const t = tab(tabId); if (!t?.pinnedUrl) return
+  t.url = t.pinnedUrl; views.get(tabId)?.webContents.loadURL(t.pinnedUrl).catch(() => {}); store.save(); pushState()
+}
+function siteMenu () {
+  const id = activeTabId(); const t = tab(id); if (!t) return toast('Open a page first')
+  const wc = views.get(id)?.webContents; const o = originOf(t.url); let host = ''; try { host = new URL(t.url).hostname } catch {}
+  const blocked = live.get(id)?.blocked || 0
+  Menu.buildFromTemplate([
+    { label: host || 'This page', enabled: false },
+    { label: `${blocked} ads & trackers blocked`, enabled: false },
+    { type: 'separator' },
+    { label: 'Site Inspector — certificate, headers, cookies, tech stack', click: () => openInspector() },
+    { label: S.boosts[host] ? 'Edit Boost…' : 'Boost This Site…', click: () => boostSite() },
+    { label: 'Reset Site Permissions', enabled: !!S.permissions[o], click: () => { delete S.permissions[o]; store.save(); toast('Permissions reset') } },
+    { type: 'separator' },
+    { label: 'Zoom In', click: () => zoom(1) }, { label: 'Zoom Out', click: () => zoom(-1) }, { label: 'Actual Size', click: () => zoom(0) },
+    { type: 'separator' },
+    { label: 'Pop Out Video', click: () => runCommand('pip') },
+    { label: 'Open in Split View…', click: () => runCommand('split') },
+    { label: 'Clear Cookies for This Site', enabled: !!wc, click: async () => { const cs = await wc.session.cookies.get({ url: t.url }); for (const c of cs) await wc.session.cookies.remove(t.url, c.name); toast(`Removed ${cs.length} cookies`) } }
+  ]).popup({ window: win })
+}
+
 function pushState () {
   if (!win || win.isDestroyed()) return
   const sp = space()
   const t = (id) => {
     const x = tab(id); if (!x) return null
     const l = live.get(id)
-    return { id, title: x.customTitle || x.title, url: x.url, favicon: iconFor(x), loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted }
+    return { id, title: x.customTitle || x.title, url: x.url, favicon: iconFor(x), loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted, drifted: drifted(x) }
   }
   const act = sp.activeTabId; const l = live.get(act)
   win.webContents.send('state', {
-    spaces: S.spaces.map(s => ({ id: s.id, name: s.name, color: s.color, profile: profile(s.profileId)?.name })),
+    spaces: S.spaces.map(s => ({ id: s.id, name: s.name, icon: s.icon || '', color: s.color, theme: s.theme, profile: profile(s.profileId)?.name })),
     activeSpaceId: S.activeSpaceId,
     favorites: profile(sp.profileId).favorites.map(t).filter(Boolean),
-    pinned: sp.pinned.map(t).filter(Boolean),
+    pinned: sp.pinned.map(id => S.folders[id] ? { folder: true, id, name: S.folders[id].name, open: S.folders[id].open !== false, items: S.folders[id].items.map(t).filter(Boolean) } : t(id)).filter(Boolean),
     today: sp.today.map(t).filter(Boolean),
     activeTabId: act,
     split: sp.split,
@@ -1822,7 +2226,9 @@ function pushState () {
     sidebarWidth: S.settings.sidebarWidth,
     nav: { canBack: l?.canBack, canFwd: l?.canFwd, loading: l?.loading, url: tab(act)?.url || '', blocked: l?.blocked || 0 },
     settings: { blocker: S.settings.blocker, httpsOnly: S.settings.httpsOnly },
-    downloads: downloads.slice(0, 5),
+    downloads: downloads.slice(0, 40).map(d => ({ id: d.id, name: d.name, state: d.state, received: d.received, total: d.total, startedAt: d.startedAt, doneAt: d.doneAt })),
+    downloadsOpen,
+    popoverOpen,
     isMac,
     fullscreen: win.isFullScreen(),
     private: PRIVATE,
@@ -1834,16 +2240,24 @@ function pushState () {
 function toast (msg) { win?.webContents.send('toast', msg) }
 
 // ---------------------------------------------------------------- IPC (only from our own UI views)
-const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents)
+const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents) || (previewView && e.sender === previewView.webContents) || (popView && e.sender === popView.webContents)
 const ACTIONS = {
   ready: () => { pushState(); layout() },
   activate: (id) => activateTab(id),
   close: (id) => closeTab(id),
   'tab-menu': (id) => tabContextMenu(id),
   'space-menu': (id) => spaceContextMenu(id),
+  'space-edit': (id) => openSettings('spaces', id),
+  'reset-pinned': (id) => resetPinned(id),
+  'site-menu': () => siteMenu(),
+  'copy-url': () => copyUrl(),
   'switch-space': (id) => switchSpace(id),
   'new-space': () => prompt('Name your new space', '', (n) => n && createSpace(n)),
-  move: (id, to, index, spaceId) => moveTab(id, to, { index, spaceId: spaceId || S.activeSpaceId }),
+  move: (id, to, index, spaceId, folderId) => moveTab(id, to, { index, spaceId: spaceId || S.activeSpaceId, folderId }),
+  'move-folder': (fid, index) => { const sp = space(); const i = sp.pinned.indexOf(fid); if (i < 0) return; sp.pinned.splice(i, 1); sp.pinned.splice(Math.max(0, Math.min(index, sp.pinned.length)), 0, fid); store.save(); pushState() },
+  'toggle-folder': (fid) => { const f = S.folders[fid]; if (f) { f.open = f.open === false; store.save(); pushState() } },
+  'folder-menu': (fid) => folderMenu(fid),
+  'new-folder': () => newFolder(),
   'command-bar': (mode) => commandBar(mode),
   back: () => navActive(wc => wc.navigationHistory.goBack()),
   forward: () => navActive(wc => wc.navigationHistory.goForward()),
@@ -1920,7 +2334,7 @@ function buildMenu () {
   const tabNums = Array.from({ length: 9 }, (_, i) => ({
     label: `Tab ${i + 1}`, accelerator: `CmdOrCtrl+${i + 1}`, visible: false,
     click: () => {
-      const sp = space(); const list = [...profile(sp.profileId).favorites, ...sp.pinned, ...sp.today]
+      const sp = space(); const list = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...sp.today]
       const id = i === 8 ? list[list.length - 1] : list[i]; if (id) activateTab(id)
     }
   }))
@@ -1997,7 +2411,7 @@ function buildMenu () {
   Menu.setApplicationMenu(Menu.buildFromTemplate(tmpl))
 }
 function stepTab (dir) {
-  const sp = space(); const list = [...profile(sp.profileId).favorites, ...sp.pinned, ...sp.today]
+  const sp = space(); const list = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...sp.today]
   if (!list.length) return
   const i = list.indexOf(sp.activeTabId)
   activateTab(list[(i + dir + list.length) % list.length])
@@ -2065,11 +2479,20 @@ function createWindow () {
 function sanitizeState () {
   // drop dangling tab references from older/corrupted state
   const seen = new Set()
+  S.folders = S.folders && typeof S.folders === 'object' ? S.folders : {}
   const clean = (list) => list.filter(id => S.tabs[id] && !seen.has(id) && seen.add(id))
   for (const p of S.profiles) p.favorites = clean(p.favorites || [])
   for (const sp of S.spaces) {
-    sp.pinned = clean(sp.pinned || []); sp.today = clean(sp.today || [])
+    sp.pinned = (sp.pinned || []).filter(id => {
+      const f = S.folders[id]
+      if (!f) return S.tabs[id] && !seen.has(id) && seen.add(id)
+      if (seen.has(id)) return false
+      seen.add(id); f.items = clean(f.items || []); return true
+    })
+    sp.today = clean(sp.today || [])
     if (!profile(sp.profileId)) sp.profileId = 'default'
+    sp.theme = cleanTheme(sp.theme || defaultTheme(sp.color), sp.color); sp.color = sp.theme.colors[0]
+    if (typeof sp.icon !== 'string') sp.icon = ''
     if (sp.split && sp.split.a) sp.split = { ids: [sp.split.a, sp.split.b], dir: 'row', sizes: [sp.split.ratio || 0.5, 1 - (sp.split.ratio || 0.5)] }
     if (sp.split) {
       const keep = sp.split.ids.map((id, i) => [id, sp.split.sizes?.[i] || 1]).filter(([id]) => seen.has(id)).slice(0, MAX_SPLIT)
@@ -2099,6 +2522,9 @@ app.whenReady().then(() => {
   store = new Store(path.join(app.getPath('userData'), 'drift-state.json'), DEFAULTS)
   S = store.state
   S.sync = { ...DEFAULTS.sync, ...(S.sync || {}) }
+  // downloads list survives restarts; anything that was mid-download is now interrupted
+  for (const d of (Array.isArray(S.downloads) ? S.downloads : []).slice(0, 60)) { if (d.state === 'progressing' || d.state === 'paused') d.state = 'interrupted'; downloads.push(d) }
+  S.downloads = downloads
   passwords = createPasswords({
     file: path.join(app.getPath('userData'), 'drift-passwords.json'),
     getWin: () => win,
@@ -2151,4 +2577,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })

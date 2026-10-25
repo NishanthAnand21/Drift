@@ -25,6 +25,7 @@ function decrypt (text, passphrase) {
 }
 
 // Pure merge of browser structure. `local` is the live state (mutated), `remote` a device payload.
+const flatPinned = (S, sp) => sp.pinned.flatMap(id => S.folders?.[id] ? S.folders[id].items : [id])
 function mergeState (S, remote, newTabId) {
   let changed = false
   S.sync.tombstones = S.sync.tombstones || {}
@@ -32,7 +33,7 @@ function mergeState (S, remote, newTabId) {
     S.sync.tombstones[id] = Math.max(S.sync.tombstones[id] || 0, t)
     const sp = S.spaces.find(s => s.id === id)
     if (sp && (sp.updatedAt || 0) <= t && S.spaces.length > 1) {
-      for (const tid of [...sp.pinned, ...sp.today]) delete S.tabs[tid]
+      for (const tid of [...flatPinned(S, sp), ...sp.today]) delete S.tabs[tid]
       S.spaces = S.spaces.filter(s => s !== sp); changed = true
       if (S.activeSpaceId === id) S.activeSpaceId = S.spaces[0].id
     }
@@ -58,13 +59,21 @@ function mergeState (S, remote, newTabId) {
     let sp = S.spaces.find(x => x.id === rs.id)
     if (!sp) {
       if (!S.profiles.some(p => p.id === rs.profileId)) continue
-      sp = { id: rs.id, name: rs.name, color: rs.color, profileId: rs.profileId, pinned: [], today: [], activeTabId: null, split: null, updatedAt: 0 }
+      sp = { id: rs.id, name: rs.name, color: rs.color, icon: '', profileId: rs.profileId, pinned: [], today: [], activeTabId: null, split: null, updatedAt: 0 }
       S.spaces.push(sp); changed = true
     }
     if ((rs.updatedAt || 0) > (sp.updatedAt || 0)) {
-      const keep = adoptTabs(rs.pinned, sp.pinned)
-      for (const id of sp.pinned) if (!keep.includes(id)) { delete S.tabs[id]; if (sp.activeTabId === id) sp.activeTabId = null }
-      Object.assign(sp, { name: rs.name, color: rs.color, pinned: keep, updatedAt: rs.updatedAt })
+      const local = flatPinned(S, sp)
+      const keep = adoptTabs(rs.pinned, local)
+      for (const id of local) if (!keep.includes(id)) { delete S.tabs[id]; if (sp.activeTabId === id) sp.activeTabId = null }
+      // folders are per-device: keep them, drop tabs removed elsewhere, put new tabs at the top level
+      const folders = sp.pinned.filter(id => S.folders?.[id])
+      const inFolders = new Set()
+      for (const fid of folders) { S.folders[fid].items = S.folders[fid].items.filter(id => keep.includes(id)); S.folders[fid].items.forEach(id => inFolders.add(id)) }
+      const pinned = [...folders, ...keep.filter(id => !inFolders.has(id))]
+      Object.assign(sp, { name: rs.name, color: rs.color, pinned, updatedAt: rs.updatedAt })
+      if (rs.theme) sp.theme = rs.theme // validated by sanitizeState() after every merge
+      if (typeof rs.icon === 'string') sp.icon = rs.icon
       changed = true
     }
   }
@@ -84,7 +93,7 @@ function stampChanges (S) {
   S.sync.sigs = S.sync.sigs || {}
   const now = Date.now()
   for (const sp of S.spaces) {
-    const sig = [sp.name, sp.color, sp.profileId, tabSig(S, sp.pinned)].join('#')
+    const sig = [sp.name, sp.color, sp.icon || '', JSON.stringify(sp.theme || null), sp.profileId, tabSig(S, flatPinned(S, sp))].join('#')
     if (S.sync.sigs[sp.id] !== sig) { S.sync.sigs[sp.id] = sig; sp.updatedAt = now }
   }
   for (const p of S.profiles) {
@@ -100,7 +109,7 @@ function buildPayload (S, passwords) {
     deviceId: S.sync.deviceId,
     writtenAt: Date.now(),
     profiles: S.profiles.map(p => ({ id: p.id, name: p.name, updatedAt: p.updatedAt || 0, favorites: tabs(p.favorites) })),
-    spaces: S.spaces.map(s => ({ id: s.id, name: s.name, color: s.color, profileId: s.profileId, updatedAt: s.updatedAt || 0, pinned: tabs(s.pinned) })),
+    spaces: S.spaces.map(s => ({ id: s.id, name: s.name, color: s.color, icon: s.icon || '', theme: s.theme, profileId: s.profileId, updatedAt: s.updatedAt || 0, pinned: tabs(flatPinned(S, s)) })),
     tombstones: S.sync.tombstones || {},
     history: S.history.slice(0, 1000),
     passwords: passwords.exportForSync()

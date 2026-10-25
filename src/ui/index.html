@@ -10,28 +10,35 @@
 <aside id="sidebar">
   <div class="top drag">
     <div class="lights"></div>
-    <button class="ib" id="b-sidebar" title="Toggle sidebar (⌘S)">◧</button>
+    <button class="ib" id="b-sidebar" title="Toggle sidebar (⌘S)" data-icon="sidebar"></button>
     <span class="flex"></span>
-    <browser-action-list id="exts" alignment="bottom right"></browser-action-list>
-    <button class="ib" id="b-claude" title="Ask Claude (⌘E)">✳</button>
-    <button class="ib" id="b-back" title="Back (⌘[)">←</button>
-    <button class="ib" id="b-fwd" title="Forward (⌘])">→</button>
-    <button class="ib" id="b-reload" title="Reload (⌘R)">↻</button>
+    <button class="ib" id="b-back" title="Back (⌘[)" data-icon="back"></button>
+    <button class="ib" id="b-fwd" title="Forward (⌘])" data-icon="forward"></button>
+    <button class="ib" id="b-reload" title="Reload (⌘R)" data-icon="reload"></button>
   </div>
-  <div id="urlbar" title="Edit URL (⌘L)"><span id="shield" title="Site Inspector — security & tech stack (⌘⇧I)">ⓘ</span><span id="blocked"></span><span id="url-text"></span></div>
+  <div id="urlbar" title="Edit URL (⌘L)">
+    <span id="url-text"></span>
+    <browser-action-list id="exts" alignment="bottom right"></browser-action-list>
+    <button class="ub" id="b-claude" title="Ask Claude (⌘E)" data-icon="claude"></button>
+    <button class="ub" id="b-copy" title="Copy link (⌘⇧C)" data-icon="link"></button>
+    <button class="ub" id="b-site" title="Site controls — security, permissions, Boost" data-icon="sliders"><span id="blocked"></span></button>
+  </div>
   <div id="favorites" class="dropzone" data-zone="favorite"></div>
   <div id="scroll">
-    <div id="space-name"></div>
+    <div id="space-head"><span id="space-icon"></span><span id="space-name"></span><span id="space-profile"></span></div>
     <div id="pinned" class="dropzone list" data-zone="pinned"></div>
-    <div class="divider"><span></span><button id="b-tidy" title="Tidy: group by site, archive duplicates">✧ Tidy</button><button id="b-clear" title="Archive all unpinned tabs">↓ Clear</button></div>
-    <button id="b-newtab" class="row newtab">＋ New Tab</button>
+    <div class="divider"><span class="line"></span><button id="b-tidy" title="Tidy: group by site, archive duplicates"><i data-icon="broom"></i>Tidy</button><span class="sep" id="tidy-sep"></span><button id="b-clear" title="Archive all unpinned tabs"><i data-icon="down"></i>Clear</button></div>
+    <button id="b-newtab" class="row newtab"><i data-icon="plus"></i><span class="t">New Tab</span></button>
     <div id="today" class="dropzone list" data-zone="today"></div>
   </div>
-  <div id="downloads"></div>
+  <div id="dlpanel">
+    <div class="dl-head"><b>Downloads</b><span class="flex"></span><button id="dl-archive" title="Library: archived tabs, media, spaces, Boosts">Archive</button><button id="dl-folder" title="Open the downloads folder">Folder</button><button id="dl-clear" title="Clear finished downloads from this list">Clear</button></div>
+    <div id="dl-list"></div>
+  </div>
   <div class="bottom">
-    <button class="ib" id="b-archive" title="Library: downloads, media, spaces, boosts, archive">▤</button>
+    <button class="ib" id="b-archive" title="Downloads & Library" data-icon="library"><span id="dl-badge"></span></button>
     <div id="spaces"></div>
-    <button class="ib" id="b-newspace" title="New space">＋</button>
+    <button class="ib" id="b-newspace" title="New space" data-icon="plus"></button>
   </div>
 </aside>
 <div id="resizer"></div>
