@@ -108,7 +108,7 @@ const DEFAULTS = {
     blocker: true,
     httpsOnly: true,
     suggestions: true,
-    sidebarWidth: 260,
+    sidebarWidth: 285,
     autoUpdate: true,
     warnBeforeQuit: true,
     restoreSession: true,
@@ -1027,79 +1027,114 @@ function layout () {
   const x0 = sw || PAD
   const chatW = chatOpen && !htmlFullscreen ? CHAT_W + 6 : 0
   const area = { x: x0, y: PAD, width: Math.max(100, w - x0 - PAD - chatW), height: Math.max(100, h - PAD * 2) }
+  shownPanels = []
   if (chatOpen && !htmlFullscreen) {
     const px = w - PAD - CHAT_W
     if (accountMode() && claudeBar && claudeWeb) {
-      win.contentView.addChildView(claudeBar); claudeBar.setBounds({ x: px, y: PAD, width: CHAT_W, height: 40 })
-      win.contentView.addChildView(claudeWeb); claudeWeb.setBounds({ x: px, y: PAD + 44, width: CHAT_W, height: h - PAD * 2 - 44 })
-    } else if (chatView) { win.contentView.addChildView(chatView); chatView.setBounds({ x: px, y: PAD, width: CHAT_W, height: h - PAD * 2 }) }
+      claudeBar.setBounds({ x: px, y: PAD, width: CHAT_W, height: 40 })
+      claudeWeb.setBounds({ x: px, y: PAD + 44, width: CHAT_W, height: h - PAD * 2 - 44 })
+      shownPanels = [claudeBar, claudeWeb]
+    } else if (chatView) { chatView.setBounds({ x: px, y: PAD, width: CHAT_W, height: h - PAD * 2 }); shownPanels = [chatView] }
   }
   const rects = needed.length > 1 ? splitRects(area, sp.split) : [area]
-  needed.forEach((id, i) => {
+  shownTabs = needed.map((id, i) => {
     const v = ensureView(id)
-    win.contentView.addChildView(v)
-    if (htmlFullscreen) { v.setBounds({ x: 0, y: 0, width: w, height: h }); v.setBorderRadius?.(0); return }
+    if (htmlFullscreen) { v.setBounds({ x: 0, y: 0, width: w, height: h }); v.setBorderRadius?.(0); return v }
     v.setBorderRadius?.(10)
     v.setBounds(rects[i])
+    return v
   })
   placeSidebarFloat()
-  // traffic lights belong to the sidebar: hidden with it, back when it peeks (like Arc)
-  if (isMac) win.setWindowButtonVisibility?.(!htmlFullscreen && (S.sidebarVisible || sidebarPeek))
+  restack()
   lastLayout = { area, rects, dir: sp.split?.dir || 'row' }
   win.webContents.send('layout', { area, panes: needed.length > 1 && !htmlFullscreen ? needed.map((id, i) => ({ id, ...rects[i], active: id === act })) : null, dir: sp.split?.dir || 'row' })
+}
+
+// ---------------------------------------------------------------- view stacking
+// One fixed order, bottom to top: tabs, Claude panel, floating sidebar, favourite preview, popovers,
+// command bar / find, Peek, drag shield. Views are only attached or moved when the order is actually
+// wrong: re-adding an attached view moves it, which can flicker the page or drop keyboard focus, and
+// used to bury the command bar, popovers and the split-drag shield under the tabs.
+let shownTabs = []; let shownPanels = []
+function restack () {
+  if (!win || win.isDestroyed()) return
+  const open = new Set(views.values()); const alive = (v) => v && !v.webContents.isDestroyed()
+  const want = [...shownTabs.filter(v => open.has(v)), ...shownPanels.filter(alive), floatAttached && sidebarFloat, toastShown && toastView, previewFor && previewView, popoverOpen && popView,
+    overlayOpen && overlay, peekView, dragMode && dragShield].filter(Boolean)
+  const kids = win.contentView.children
+  let prev = -1; let i = 0
+  for (; i < want.length; i++) {
+    const at = kids.indexOf(want[i])
+    if (at > prev) { prev = at; continue }
+    if (at >= 0) break // attached but below a view it should be above: re-add the rest on top, in order
+    win.contentView.addChildView(want[i], prev + 1); prev++; kids.splice(prev, 0, want[i])
+  }
+  for (; i < want.length; i++) win.contentView.addChildView(want[i])
 }
 
 // ---------------------------------------------------------------- floating sidebar
 // Hovering the left edge while the sidebar is hidden floats it over the page instead of pushing the
 // page aside, like Arc. It's a second copy of the sidebar UI in its own view stacked above the tabs;
 // only the sidebar button (⌘S) docks it and resizes the page.
-const FLOAT_INSET = 6; const FLOAT_SHADOW = 28
-let sidebarFloat = null; let peekTimer = null; let floatHideTimer = null; let menuOpen = 0
+const FLOAT_INSET = 6; const FLOAT_SHADOW = 28; const EDGE = PAD
+let sidebarFloat = null; let floatAttached = false; let peekTimer = null; let floatShrinkTimer = null; let menuOpen = 0
 function ensureSidebarFloat () {
   if (sidebarFloat) return sidebarFloat
-  sidebarFloat = new WebContentsView({ webPreferences: { preload: fs.existsSync(MAIN_PRELOAD) ? MAIN_PRELOAD : PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false } })
+  sidebarFloat = new WebContentsView({ webPreferences: { preload: fs.existsSync(MAIN_PRELOAD) ? MAIN_PRELOAD : PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false, backgroundThrottling: false } })
   sidebarFloat.setBackgroundColor('#00000000')
   sidebarFloat.webContents.loadURL(uiURL('index.html', { float: 1 }))
   sidebarFloat.webContents.on('will-navigate', e => e.preventDefault())
   sidebarFloat.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   return sidebarFloat
 }
+// While the sidebar is hidden the floating copy stays loaded and attached as a thin strip along the
+// left edge (over the window margin, not the page). Hovering the strip slides the sidebar out at once
+// in that view, and main only has to widen it — no page load, no layout, no full state push.
 function placeSidebarFloat () {
-  if (!(sidebarPeek && !S.sidebarVisible && !htmlFullscreen)) {
-    if (!sidebarFloat) return
-    const remove = () => { floatHideTimer = null; if (!sidebarPeek || S.sidebarVisible) { try { win?.contentView.removeChildView(sidebarFloat) } catch {} } }
-    // let it slide out first; when docking it goes at once (the docked sidebar is already there)
-    if (S.sidebarVisible || htmlFullscreen) { clearTimeout(floatHideTimer); remove() } else if (!floatHideTimer) floatHideTimer = setTimeout(remove, 170)
-    return
+  if (!win) return
+  const hidden = !S.sidebarVisible && !htmlFullscreen
+  if (!hidden) {
+    clearTimeout(floatShrinkTimer); floatShrinkTimer = null
+    if (sidebarFloat && floatAttached) { try { win.contentView.removeChildView(sidebarFloat) } catch {} }
+    floatAttached = false
+  } else {
+    ensureSidebarFloat()
+    floatAttached = true
+    const [, h] = win.getContentSize()
+    const full = { x: 0, y: 0, width: S.settings.sidebarWidth + FLOAT_INSET + FLOAT_SHADOW, height: h }
+    if (sidebarPeek) { clearTimeout(floatShrinkTimer); floatShrinkTimer = null; sidebarFloat.setBounds(full) } else if (!floatShrinkTimer) {
+      // let the card slide out before the view shrinks back to the edge strip
+      const shrink = () => { floatShrinkTimer = null; if (!sidebarPeek && floatAttached) { const [, hh] = win.getContentSize(); sidebarFloat.setBounds({ x: 0, y: 0, width: EDGE, height: hh }) } }
+      if (sidebarFloat.getBounds().width > EDGE) floatShrinkTimer = setTimeout(shrink, 170); else shrink()
+    }
+    restack()
   }
-  clearTimeout(floatHideTimer); floatHideTimer = null
-  const [, h] = win.getContentSize()
-  ensureSidebarFloat()
-  win.contentView.addChildView(sidebarFloat)
-  sidebarFloat.setBounds({ x: 0, y: 0, width: S.settings.sidebarWidth + FLOAT_INSET + FLOAT_SHADOW, height: h })
-  // the command bar and popovers opened from the floating sidebar stay above it
-  if (overlayOpen) win.contentView.addChildView(overlay)
-  if (popoverOpen) win.contentView.addChildView(popView)
-  if (previewFor && previewView) win.contentView.addChildView(previewView)
+  // traffic lights belong to the sidebar: hidden with it, back when it peeks (like Arc)
+  if (isMac && !win.isFullScreen()) win.setWindowButtonVisibility?.(!htmlFullscreen && (S.sidebarVisible || sidebarPeek))
 }
 function setPeek (on) {
   clearTimeout(peekTimer); peekTimer = null
   if (S.sidebarVisible || on === sidebarPeek) return
-  sidebarPeek = on; pushState(); layout()
+  sidebarPeek = on
+  if (sidebarFloat && !sidebarFloat.webContents.isDestroyed()) sidebarFloat.webContents.send('sidebar-peek', on)
+  placeSidebarFloat()
 }
-// The pointer left the floating sidebar: hide it once it's really outside, and not while a menu,
-// popover or the command bar opened from it is still up (those call this again when they close)
+// The pointer left the floating sidebar (or crossed into a drag region / another view): hide it only
+// once it's really outside, and not while a menu, popover or the command bar opened from it is up
+// (those call this again when they close)
 function peekCheck () {
   if (!sidebarPeek || S.sidebarVisible) return
   clearTimeout(peekTimer)
   peekTimer = setTimeout(() => {
     peekTimer = null
-    if (!win || win.isDestroyed() || menuOpen || popoverOpen || overlayOpen || previewFor) return
+    // the find bar and link Peek aren't opened from the sidebar, so they don't keep it out
+    const fromSidebar = overlayOpen && !['find', 'peek'].includes(overlayOpen.mode)
+    if (!win || win.isDestroyed() || menuOpen || popoverOpen || fromSidebar || previewFor) return
     const p = screen.getCursorScreenPoint(); const c = win.getContentBounds()
     const x = p.x - c.x; const y = p.y - c.y
     if (x >= 0 && y >= 0 && y < c.height && x < S.settings.sidebarWidth + FLOAT_INSET) return
     setPeek(false)
-  }, 180)
+  }, 120)
 }
 // Options for every native menu: counts open menus so the floating sidebar stays while one is up
 function menuOpts () { menuOpen++; return { window: win, callback: () => { menuOpen = Math.max(0, menuOpen - 1); peekCheck() } } }
@@ -1123,20 +1158,30 @@ function splitRects (area, split) {
   })
   return rects
 }
-// Divider dragging: a transparent full-window shield captures the mouse while you drag
-let dragShield = null; let dragIndex = -1
-function startSplitDrag (index) {
-  const sp = space(); if (!sp.split || index < 0 || index >= sp.split.ids.length - 1) return
-  dragIndex = index
+// Dragging a split divider or the sidebar edge. The sidebar UI where the drag started follows the
+// mouse itself (on macOS it keeps receiving the drag even over the pages); a transparent full-window
+// shield above the pages catches it too where it doesn't, and shows the resize cursor.
+let dragShield = null; let dragIndex = -1; let dragMode = null
+function startShieldDrag (mode, dir) {
+  dragMode = mode
   if (!dragShield) {
     dragShield = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
     dragShield.setBackgroundColor('#00000000')
     dragShield.webContents.on('will-navigate', e => e.preventDefault())
   }
-  dragShield.webContents.loadURL(uiURL('drag-shield.html', { dir: sp.split.dir }))
+  const url = uiURL('drag-shield.html', { dir })
+  if (dragShield.webContents.getURL() !== url) dragShield.webContents.loadURL(url)
   const [w, h] = win.getContentSize()
-  win.contentView.addChildView(dragShield); dragShield.setBounds({ x: 0, y: 0, width: w, height: h })
+  dragShield.setBounds({ x: 0, y: 0, width: w, height: h })
+  restack()
 }
+function startSplitDrag (index) {
+  const sp = space(); if (!sp.split || index < 0 || index >= sp.split.ids.length - 1) return
+  dragIndex = index
+  startShieldDrag('split', sp.split.dir)
+}
+function setSidebarWidth (x) { S.settings.sidebarWidth = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(x))); layout(); pushStateSoon() }
+function shieldDrag (x, y) { if (dragMode === 'sidebar') setSidebarWidth(x); else splitDrag(x, y) }
 function splitDrag (x, y) {
   const sp = space(); if (!sp.split || dragIndex < 0 || !lastLayout) return
   const { area } = lastLayout; const row = sp.split.dir !== 'col'
@@ -1149,7 +1194,8 @@ function splitDrag (x, y) {
   layout()
 }
 function endSplitDrag () {
-  dragIndex = -1
+  if (!dragMode && dragIndex < 0) return
+  dragIndex = -1; dragMode = null
   if (dragShield) { try { win.contentView.removeChildView(dragShield) } catch {} }
   store.save()
 }
@@ -1180,8 +1226,8 @@ function ensureOverlay () {
 function openOverlay (opts) {
   ensureOverlay()
   overlayOpen = opts
-  win.contentView.addChildView(overlay)
   overlay.setBounds(overlayBounds())
+  restack()
   const payload = { ...opts, snapshot: paletteSnapshot() }
   const send = () => { overlay.webContents.send('open', payload); overlay.webContents.focus() }
   if (overlay.webContents.isLoading()) overlay.webContents.once('did-finish-load', send); else send()
@@ -1507,8 +1553,7 @@ async function showFavPreview (tabId, rect) {
   const [w, h] = win.getContentSize()
   const x = Math.max(8, Math.min(Math.round(rect.x + rect.width * 0.45), w - PREVIEW_W - 8))
   const y = Math.max(8, Math.min(Math.round(rect.y + rect.height + 4), h - PREVIEW_H - 8))
-  win.contentView.addChildView(previewView)
-  previewView.setBounds({ x, y, width: PREVIEW_W, height: PREVIEW_H })
+  previewView.setBounds({ x, y, width: PREVIEW_W, height: PREVIEW_H }); restack()
   const t = tab(tabId)
   // Gmail favourites that aren't loaded yet are loaded in the background so the inbox can be shown
   if (!views.has(tabId) && hostOf(t.url) === 'mail.google.com') {
@@ -1605,14 +1650,18 @@ function ensurePopView () {
   popView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   return popView
 }
+// Popovers follow the space's light/dark mode, like the sidebar
+function popoverDark () { const m = space().theme?.mode; return PRIVATE || m === 'dark' || (m !== 'light' && nativeTheme.shouldUseDarkColors) }
 function openPopover (data) {
+  data = { ...data, dark: popoverDark() }
   ensurePopView()
   const [w, h] = win.getContentSize()
-  win.contentView.addChildView(popView); popView.setBounds({ x: 0, y: 0, width: w, height: h })
+  popoverOpen = data.kind
+  popView.setBounds({ x: 0, y: 0, width: w, height: h }); restack()
   const wc = popView.webContents
   const send = () => { wc.send('popover', data); wc.focus() }
   if (wc.isLoading()) wc.once('did-finish-load', send); else send()
-  popoverOpen = data.kind; pushState()
+  pushState()
 }
 let popoverOpen = null
 function closePopover () {
@@ -1687,7 +1736,7 @@ function setSiteSetting (key, value) {
     if (key === 'adblock') views.get(activeTabId())?.webContents.reload()
   }
   store.save()
-  popView?.webContents.send('popover', { ...siteControlsData(), anchor: null, refresh: true })
+  popView?.webContents.send('popover', { ...siteControlsData(), anchor: null, refresh: true, dark: popoverDark() })
 }
 async function screenshotPage () {
   const v = views.get(activeTabId()); if (!v) return
@@ -1853,8 +1902,7 @@ function openPeek (url) {
   peekView.webContents.on('page-title-updated', (_e, t) => overlay?.webContents.send('peek-title', t))
   peekView.webContents.loadURL(url).catch(() => {})
   openOverlay({ mode: 'peek', query: url })
-  win.contentView.addChildView(peekView)
-  peekView.setBounds(peekBounds())
+  peekView.setBounds(peekBounds()); restack()
   peekView.webContents.focus()
 }
 function destroyPeek () {
@@ -2147,8 +2195,9 @@ function openSettings (page, spaceId) {
   settingsSpace = spaceId || null
   if (settingsWin && !settingsWin.isDestroyed()) { settingsWin.focus(); sendSettings(); return }
   settingsWin = new BrowserWindow({
-    width: 820, height: 720, minWidth: 640, minHeight: 480, title: 'Settings', show: false,
-    titleBarStyle: isMac ? 'hiddenInset' : 'default', backgroundColor: nativeTheme.shouldUseDarkColors ? '#2b2826' : '#f4f2f7',
+    // a compact preferences window like Arc's: centred title, icon tabs, cards
+    width: 640, height: 600, minWidth: 600, minHeight: 440, title: 'Settings', show: false, maximizable: false, fullscreenable: false,
+    titleBarStyle: isMac ? 'hidden' : 'default', backgroundColor: nativeTheme.shouldUseDarkColors ? '#2b2927' : '#ececee',
     webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false }
   })
   settingsWin.loadURL(uiURL('settings.html'))
@@ -2385,7 +2434,7 @@ function zoom (dir) {
   wc.setZoomLevel(z); toast(`Zoom ${Math.round(Math.pow(1.2, z) * 100)}%`)
 }
 function findInPage () { if (activeTabId()) openOverlay({ mode: 'find', query: '' }) }
-function toggleSidebar () { S.sidebarVisible = !S.sidebarVisible; sidebarPeek = false; clearTimeout(peekTimer); store.save(); layout(); pushState() }
+function toggleSidebar () { S.sidebarVisible = !S.sidebarVisible; sidebarPeek = false; clearTimeout(peekTimer); sidebarFloat?.webContents.send('sidebar-peek', false); store.save(); layout(); pushState() }
 
 function navActive (fn) { const wc = views.get(activeTabId())?.webContents; if (wc) fn(wc) }
 
@@ -2492,7 +2541,26 @@ function pushState () {
     activeWcId: views.get(act)?.webContents.id || null
   })
 }
-function toast (msg) { win?.webContents.send('toast', msg) }
+// Toasts appear at the bottom of the docked sidebar; while it's hidden they get a small view of their
+// own above the page (the sidebar UI would be underneath it)
+let toastView = null; let toastShown = false; let toastTimer = null
+function toast (msg) {
+  if (!win || win.isDestroyed()) return
+  if (S.sidebarVisible || sidebarPeek) { sendSidebar('toast', msg); return }
+  if (!toastView) {
+    toastView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    toastView.setBackgroundColor('#00000000')
+    toastView.webContents.loadURL(uiURL('toast.html'))
+    toastView.webContents.on('will-navigate', e => e.preventDefault())
+  }
+  const [, h] = win.getContentSize()
+  toastView.setBounds({ x: PAD + 10, y: h - PAD - 10 - 44, width: 340, height: 44 })
+  toastShown = true; restack()
+  const send = () => toastView.webContents.send('toast', msg)
+  if (toastView.webContents.isLoading()) toastView.webContents.once('did-finish-load', send); else send()
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastShown = false; try { win?.contentView.removeChildView(toastView) } catch {} }, 2800)
+}
 
 // ---------------------------------------------------------------- IPC (only from our own UI views)
 const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents) || (previewView && e.sender === previewView.webContents) || (popView && e.sender === popView.webContents) || (sidebarFloat && e.sender === sidebarFloat.webContents)
@@ -2518,11 +2586,12 @@ const ACTIONS = {
   forward: () => navActive(wc => wc.navigationHistory.goForward()),
   reload: () => navActive(wc => wc.isLoading() ? wc.stop() : wc.reload()),
   'toggle-sidebar': toggleSidebar,
-  'sidebar-width': (w) => { S.settings.sidebarWidth = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(w))); layout(); pushStateSoon(); store.save() },
+  'sidebar-width': (w) => { setSidebarWidth(Number(w)); store.save() },
+  'sidebar-resize-start': () => { if (S.sidebarVisible) startShieldDrag('sidebar', 'row') },
   peek: (on) => { if (on) setPeek(true); else peekCheck() },
   'clear-today': clearToday,
   'split-drag-start': (i) => startSplitDrag(Number(i)),
-  'split-drag': (x, y) => splitDrag(Number(x), Number(y)),
+  'split-drag': (x, y) => shieldDrag(Number(x), Number(y)),
   'split-drag-end': () => endSplitDrag(),
   'split-equalize': () => { const sp = space(); if (sp.split) { sp.split.sizes = sp.split.ids.map(() => 1 / sp.split.ids.length); layout(); store.save() } },
   'split-focus': (id) => { if (inSplit(space(), id)) activateTab(id) },
@@ -2733,7 +2802,7 @@ function createWindow () {
   }, 250))
   win.on('focus', () => { if (pip?.auto && pip.tabId === activeTabId()) returnVideo(pip.tabId) })
   win.on('closed', () => { for (const m of miniWindows) m.win.close() })
-  win.on('closed', () => { win = null; overlay = null; sidebarFloat = null; views.clear(); wcToTab.clear(); live.clear() })
+  win.on('closed', () => { win = null; overlay = null; sidebarFloat = null; floatAttached = false; toastView = null; toastShown = false; views.clear(); wcToTab.clear(); live.clear() })
   // restore the active tab
   const sp = space()
   if (sp.activeTabId && tab(sp.activeTabId)) ensureView(sp.activeTabId)
@@ -2786,6 +2855,8 @@ app.whenReady().then(() => {
   store = new Store(path.join(app.getPath('userData'), 'drift-state.json'), DEFAULTS)
   S = store.state
   S.sync = { ...DEFAULTS.sync, ...(S.sync || {}) }
+  // Arc-sized sidebar: move the old default width to the new one once (a width you dragged is kept)
+  if (!S.layoutV2) { if (S.settings.sidebarWidth === 260) S.settings.sidebarWidth = DEFAULTS.settings.sidebarWidth; S.layoutV2 = true }
   // downloads list survives restarts; anything that was mid-download is now interrupted
   for (const d of (Array.isArray(S.downloads) ? S.downloads : []).slice(0, 60)) { if (d.state === 'progressing' || d.state === 'paused') d.state = 'interrupted'; downloads.push(d) }
   S.downloads = downloads
@@ -2843,4 +2914,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek, get dragShield () { return dragShield }, get dragMode () { return dragMode }, restack, toast, get toastView () { return toastView } })

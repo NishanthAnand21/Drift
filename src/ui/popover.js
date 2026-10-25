@@ -16,7 +16,17 @@ const I = {
   lock: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
   warn: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>',
   dots: '<circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/>',
-  plus: '<path d="M12 6v12M6 12h12"/>'
+  plus: '<path d="M12 6v12M6 12h12"/>',
+  // one icon per site setting
+  media: '<rect x="3.5" y="6.5" width="12" height="11" rx="2.5"/><path d="M15.5 10.5l5-3v9l-5-3"/>',
+  geolocation: '<path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
+  notifications: '<path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 1.5H5z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
+  'display-capture': '<rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8.5 20h7M12 16.5V20"/>',
+  'clipboard-read': '<rect x="5.5" y="5" width="13" height="16" rx="2"/><path d="M9 5V3.8h6V5M9 11h6M9 15h4"/>',
+  midi: '<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="M7.5 5.5v8h3v-8M13.5 5.5v8h3v-8M12 13.5v5"/>',
+  pip: '<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><rect x="11.5" y="11.5" width="6.5" height="4.5" rx="1"/>',
+  popups: '<rect x="3.5" y="7.5" width="13" height="12" rx="2"/><path d="M7.5 7.5v-2a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/>',
+  adblock: '<path d="M12 3.5l7 2.5v5.5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/>'
 }
 function svg (n) { const e = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); e.setAttribute('viewBox', '0 0 24 24'); e.setAttribute('class', 'i'); e.innerHTML = I[n] || ''; return e }
 const mk = (tag, cls, ...kids) => { const e = document.createElement(tag); if (cls) e.className = cls; for (const k of kids) if (k != null) e.append(k); return e }
@@ -46,7 +56,7 @@ function site (d) {
   out.push(exts, mk('h4', null, 'Settings'))
   for (const s of d.settings) {
     const off = s.value === 'block' || s.value === 'off'
-    const row = mk('div', 'set' + (off ? ' off' : ''), mk('div', 'ic', svg('gear')), mk('div', 'txt', mk('b', null, s.label), mk('span', null, VALUE[s.value] || s.value)))
+    const row = mk('div', 'set' + (off ? ' off' : ''), mk('div', 'ic', svg(I[s.key] ? s.key : 'gear')), mk('div', 'txt', mk('b', null, s.label), mk('span', null, VALUE[s.value] || s.value)))
     row.onclick = () => {
       const next = s.key === 'adblock' ? (s.value === 'on' ? 'off' : 'on') : ['pip', 'popups'].includes(s.key) ? (s.value === 'allow' ? 'block' : 'allow') : NEXT[s.value] || 'allow'
       api.send('site-setting', s.key, next)
@@ -60,24 +70,25 @@ function site (d) {
 }
 
 function place (d) {
-  const W = d.kind === 'site' ? 340 : 300
+  const W = d.kind === 'site' ? 296 : 248
   card.style.width = W + 'px'
   const a = d.anchor; const vw = innerWidth; const vh = innerHeight
   if (!a) return
   if (d.place === 'above') {
     const left = Math.max(8, Math.min(a.x + a.width - W + 22, vw - W - 8))
     card.style.left = left + 'px'; card.style.top = 'auto'; card.style.bottom = (vh - a.y + 12) + 'px'
-    arrow.style.left = (a.x + a.width / 2 - 7) + 'px'; arrow.style.top = (a.y - 19) + 'px'
+    arrow.style.left = (a.x + a.width / 2 - 6) + 'px'; arrow.style.top = (a.y - 18) + 'px'
   } else {
-    const left = Math.max(8, Math.min(a.x + a.width / 2 - 230, vw - W - 8))
+    const left = Math.max(8, Math.min(a.x + a.width / 2 - W * 0.75, vw - W - 8))
     card.style.left = left + 'px'; card.style.bottom = 'auto'; card.style.top = (a.y + a.height + 12) + 'px'
-    arrow.style.left = (a.x + a.width / 2 - 7) + 'px'; arrow.style.top = (a.y + a.height + 6) + 'px'
+    arrow.style.left = (a.x + a.width / 2 - 6) + 'px'; arrow.style.top = (a.y + a.height + 7) + 'px'
   }
 }
 api.on('popover', (d) => {
   if (!d) return
   if (d.refresh && last) d = { ...d, anchor: last.anchor, place: last.place }
   last = d
+  document.documentElement.classList.toggle('light', d.dark === false)
   card.replaceChildren(...(d.kind === 'menu' ? menu(d) : site(d)))
   place(d)
 })

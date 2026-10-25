@@ -1,0 +1,4 @@
+html,body{margin:0;height:100%;background:transparent;overflow:hidden;font:12.5px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;user-select:none;-webkit-font-smoothing:antialiased}
+#toasts{position:fixed;left:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+.toast{background:#211d2bee;color:#fff;padding:8px 14px;border-radius:9px;max-width:100%;box-sizing:border-box;box-shadow:0 6px 18px #0000003d;animation:tin .2s}
+@keyframes tin{from{opacity:0;transform:translateY(6px)}}

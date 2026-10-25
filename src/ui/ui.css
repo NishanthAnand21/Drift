@@ -9,20 +9,20 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:default;paddin
 svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none;display:block}
 .drag{-webkit-app-region:drag}.drag button{-webkit-app-region:no-drag}
 .flex{flex:1}
-#sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sw);display:flex;flex-direction:column;padding:0 8px 8px 10px;transition:transform .18s ease;z-index:2}
+#sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sw);display:flex;flex-direction:column;padding:0 8px 8px;transition:transform .18s ease;z-index:2}
 body.collapsed #sidebar{transform:translateX(-100%)}
 .top{height:48px;display:flex;align-items:center;gap:2px;flex:none}
-.lights{width:72px}
+.lights{width:76px}
 body:not(.mac) .lights,body.fullscreen .lights{width:2px}
 .ib{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;opacity:.8}
-.ib svg.i{width:19px;height:19px}
+.ib svg.i{width:17px;height:17px}
 .ib:hover:not(:disabled){background:var(--hover);opacity:1}.ib:disabled{opacity:.3}
-#urlbar{height:40px;border-radius:11px;background:var(--fill);display:flex;align-items:center;padding:0 6px 0 13px;gap:2px;margin:2px 0 10px;flex:none;-webkit-app-region:no-drag}
+#urlbar{height:36px;border-radius:10px;background:var(--fill);display:flex;align-items:center;padding:0 5px 0 12px;gap:2px;margin:0 0 9px;flex:none;-webkit-app-region:no-drag}
 #urlbar:hover{background:var(--hover)}
-#url-text{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:14px;color:var(--fg);opacity:.85}
+#url-text{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:13px;color:var(--fg);opacity:.82}
 .ub{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;position:relative;opacity:.85}
 .ub:hover{background:var(--hover);opacity:1}
-.ub svg.i{width:17px;height:17px}
+.ub svg.i{width:16px;height:16px}
 #b-claude svg.i{stroke:#d97757;stroke-width:2.1}
 body.chat #b-claude{background:var(--active)}
 #blocked{position:absolute;right:-2px;top:-3px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:var(--space);color:#fff;font-size:9px;font-weight:700;line-height:14px;text-align:center}
@@ -30,26 +30,27 @@ body.chat #b-claude{background:var(--active)}
 browser-action-list{display:flex;gap:1px}
 browser-action-list::part(action){width:28px;height:28px;border-radius:7px}
 browser-action-list::part(action):hover{background:var(--hover)}
-#favorites{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;flex:none;min-height:6px;margin-bottom:12px}
+#favorites{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;flex:none;min-height:6px;margin-bottom:10px}
 #favorites:empty{margin-bottom:4px}
-.fav{height:54px;border-radius:13px;background:var(--fill);display:grid;place-items:center;position:relative;transition:background .12s}
+.fav{height:46px;border-radius:10px;background:var(--fill);display:grid;place-items:center;position:relative;transition:background .12s}
 .fav:hover{background:var(--hover)}
 .fav.active{background:var(--active);box-shadow:var(--shadow)}
-.fav img,.fav .ph{width:22px;height:22px;border-radius:5px}
+.fav img,.fav .ph{width:16px;height:16px;border-radius:4px}
 .fav.unloaded img{opacity:.8}
 .fav .aud{position:absolute;right:5px;top:4px;width:12px;height:12px;opacity:.7}
 #scroll{flex:1;overflow-y:auto;overflow-x:hidden;margin:0 -4px;padding:0 4px}
 #scroll::-webkit-scrollbar{width:0}
-#space-head{display:flex;align-items:center;gap:9px;padding:6px 10px 10px;margin-bottom:6px;border-bottom:1px solid var(--line);font-weight:650;font-size:14px;color:var(--muted);letter-spacing:.01em}
-#space-icon{font-size:17px;line-height:1}
+#space-head{display:flex;align-items:center;gap:9px;padding:8px 10px 11px;margin-bottom:4px;border-bottom:1px solid var(--line);font-weight:650;font-size:13.5px;color:var(--muted);letter-spacing:.01em}
+#space-icon{font-size:16px;line-height:1}
 #space-icon:empty{display:none}
 #space-name{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #space-profile{font-weight:500;font-size:11px;opacity:.8}
 .list{min-height:4px}
-.row{display:flex;align-items:center;gap:11px;height:40px;padding:0 6px 0 11px;border-radius:10px;width:100%;text-align:left;position:relative;font-size:14px}
-.row:hover{background:var(--hover)}
-.row.active{background:var(--active);box-shadow:var(--shadow)}
-.row img,.row .ph{width:18px;height:18px;border-radius:4px;flex:none}
+.row{display:flex;align-items:center;gap:10px;height:41px;padding:0 6px 0 11px;border-radius:10px;width:100%;text-align:left;position:relative;z-index:0;font-size:14px;font-weight:500}
+.row::before{content:"";position:absolute;inset:3px 0;border-radius:10px;z-index:-1}
+.row:hover::before{background:var(--hover)}
+.row.active::before{background:var(--active);box-shadow:var(--shadow)}
+.row img,.row .ph{width:16px;height:16px;border-radius:4px;flex:none}
 .ph{background:color-mix(in srgb,var(--space) 65%,#fff);display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff}
 .row .t{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .row.unloaded .t{opacity:.62}
@@ -64,9 +65,9 @@ browser-action-list::part(action):hover{background:var(--hover)}
 .row .snd svg.i{width:16px;height:16px}
 .row.loading img{animation:pulse 1s infinite alternate}
 @keyframes pulse{to{opacity:.35}}
-.row.split::after{content:"";position:absolute;left:2px;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--space)}
-.newtab{color:var(--muted)}
-.newtab i svg.i{width:17px;height:17px}
+.row.split::after{content:"";position:absolute;left:2px;top:13px;bottom:13px;width:3px;border-radius:2px;background:var(--space)}
+.newtab{color:var(--muted);font-weight:400}
+.newtab i svg.i{width:16px;height:16px}
 .divider{display:flex;align-items:center;gap:6px;margin:10px 4px 6px 10px;color:var(--muted);font-size:12.5px;font-weight:600}
 .divider .line{flex:1;height:1px;background:var(--line)}
 .divider button{display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:6px}
@@ -97,6 +98,9 @@ body.collapsed #content{left:8px}
 kbd{font:inherit;padding:1px 6px;border-radius:5px;background:var(--hover)}
 body.has-tab #empty{display:none}
 #peek-edge{position:fixed;left:0;top:0;bottom:0;width:8px;display:none;z-index:4}
+/* the margin above the page moves the window (the only place left to grab it while the sidebar is hidden) */
+#top-drag{position:fixed;left:0;right:0;top:0;height:8px;z-index:4}
+html.float #top-drag{display:none}
 body.collapsed #peek-edge{display:block}
 #toasts{position:fixed;left:10px;width:calc(var(--sw) - 18px);bottom:84px;display:flex;flex-direction:column;gap:6px;z-index:9;pointer-events:none}
 .toast{background:#211d2bee;color:#fff;padding:8px 14px;border-radius:9px;font-size:12.5px;animation:tin .2s}
@@ -116,8 +120,9 @@ body.private #space-head::after{content:"nothing is saved";font-weight:400;font-
 .frow .chev{width:14px;display:grid;place-items:center;margin-right:-6px;opacity:.55;transition:transform .15s}
 .frow .chev svg.i{width:12px;height:12px;stroke-width:2.2}
 .folder.open .frow .chev{transform:rotate(90deg)}
-.frow > svg.i{width:18px;height:18px;opacity:.75}
-.frow.over{background:var(--active)}
+.folder .frow{font-weight:600}
+.frow > svg.i{width:17px;height:17px;opacity:.75}
+.frow.over::before{background:var(--active)}
 .kids{padding-left:18px;min-height:2px}
 /* downloads panel */
 #dlpanel{display:none;flex-direction:column;max-height:52%;margin:6px -2px 0;border-top:1px solid var(--line);padding-top:6px}
@@ -159,4 +164,10 @@ html.float body #sidebar{left:6px;top:6px;bottom:6px;width:var(--sw);border-radi
 html.float body.peek #sidebar{transform:none}
 html.float body.grain::before{content:none}
 html.float body.grain #sidebar::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;opacity:.22;mix-blend-mode:overlay;background-image:var(--grain)}
-html.float #resizer,html.float #panes,html.float #content,html.float #peek-edge,html.float #toasts{display:none}
+html.float #resizer,html.float #panes,html.float #content{display:none}
+html.float #toasts{left:16px}
+html.float #peek-edge{display:block;width:8px}
+html.float body.peek #peek-edge{display:none}
+/* no window-drag region in the floating copy: crossing one fires mouseleave on macOS (the sidebar
+   flickered away as you reached for its buttons) and can swallow clicks on them */
+html.float .drag{-webkit-app-region:no-drag}

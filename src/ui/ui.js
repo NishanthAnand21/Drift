@@ -6,6 +6,7 @@ let dragId = null
 let pendingRender = false
 // The same page also runs as the floating sidebar shown when you hover the left edge while it's hidden
 const FLOAT = new URLSearchParams(location.search).has('float')
+let floatSynced = false
 if (FLOAT) document.documentElement.classList.add('float')
 
 const host = (u) => { try { return new URL(u).host.replace(/^www\./, '') } catch { return u } }
@@ -138,6 +139,23 @@ function folderRow (f) {
 }
 let dragFolder = null
 
+// Keyed redraw: an entry whose data didn't change keeps its element, so favicons don't blink, hover
+// controls stay put and a click that lands in the middle of an update isn't lost (the row under the
+// mouse used to be replaced between mousedown and mouseup while pages were loading)
+const sigs = new WeakMap()
+function patch (box, items, keyOf, sigOf, make) {
+  const old = new Map([...box.children].map(n => [n.dataset.key, n]))
+  const next = items.map(it => {
+    const k = keyOf(it); const sig = sigOf(it); const n = old.get(k)
+    if (n && sigs.get(n) === sig) return n
+    const e = make(it); e.dataset.key = k; sigs.set(e, sig); return e
+  })
+  next.forEach((n, i) => { if (box.children[i] !== n) box.insertBefore(n, box.children[i] || null) })
+  while (box.children.length > next.length) box.lastChild.remove()
+}
+const inSplit = (id) => !!(S.split && S.split.ids.includes(id))
+const tabSig = (t, zone) => JSON.stringify([t, zone, t.id === S.activeTabId, inSplit(t.id)])
+
 function clearDrop () { document.querySelectorAll('.over,.drop-before,.sp.drop').forEach(e => e.classList.remove('over', 'drop-before', 'drop')) }
 
 function bindZone (z) {
@@ -176,7 +194,8 @@ function render () {
   applyTheme(sp.theme, S.private)
   document.documentElement.style.setProperty('--sw', S.sidebarWidth + 'px')
   document.body.classList.toggle('collapsed', !S.sidebarVisible)
-  document.body.classList.toggle('peek', !!S.sidebarPeek)
+  if (!FLOAT) document.body.classList.toggle('peek', !!S.sidebarPeek)
+  else if (!floatSynced) { floatSynced = true; document.body.classList.toggle('peek', !!S.sidebarPeek) } // a hover that came before this page loaded
   document.body.classList.toggle('mac', S.isMac)
   document.body.classList.toggle('fullscreen', S.fullscreen)
   document.body.classList.toggle('has-tab', !!S.activeTabId)
@@ -197,16 +216,18 @@ function render () {
   document.body.classList.toggle('dim-unloaded', S.dimUnloaded !== false)
   document.body.classList.toggle('no-pin-reset', S.pinnedResetButton === false)
 
-  $('#favorites').replaceChildren(...S.favorites.map(favTile))
+  patch($('#favorites'), S.favorites, t => t.id, t => tabSig(t, 'favorite'), favTile)
   $('#space-icon').textContent = sp.icon || ''
   $('#space-name').textContent = sp.name
   $('#space-profile').textContent = sp.profile && S.spaces.some(s => s.profile !== sp.profile) ? sp.profile : ''
   $('#space-head').oncontextmenu = (e) => { e.preventDefault(); api.send('space-menu', sp.id) }
   $('#space-head').ondblclick = () => api.send('space-edit', sp.id)
-  $('#pinned').replaceChildren(...S.pinned.map(t => t.folder ? folderRow(t) : tabRow(t, 'pinned')))
-  $('#today').replaceChildren(...S.today.map(t => tabRow(t, 'today')))
+  patch($('#pinned'), S.pinned, t => (t.folder ? 'f:' : '') + t.id,
+    t => t.folder ? JSON.stringify([t, S.activeTabId, S.split?.ids, S.pinnedResetButton]) : tabSig(t, 'pinned'),
+    t => t.folder ? folderRow(t) : tabRow(t, 'pinned'))
+  patch($('#today'), S.today, t => t.id, t => tabSig(t, 'today'), t => tabRow(t, 'today'))
 
-  $('#spaces').replaceChildren(...S.spaces.map(s => {
+  patch($('#spaces'), S.spaces, s => s.id, s => JSON.stringify([s.id, s.name, s.icon, s.profile, s.id === S.activeSpaceId]), s => {
     const b = document.createElement('button'); b.className = 'sp' + (s.id === S.activeSpaceId ? ' active' : '')
     b.title = s.name + (s.profile ? ` · ${s.profile}` : '')
     if (s.icon) b.textContent = s.icon; else b.append(document.createElement('i'))
@@ -215,7 +236,7 @@ function render () {
     b.ondragover = (e) => { if (dragId) { e.preventDefault(); clearDrop(); b.classList.add('drop') } }
     b.ondrop = (e) => { e.preventDefault(); if (dragId) api.send('move', dragId, 'today', 0, s.id); dragId = null; clearDrop() }
     return b
-  }))
+  })
 
   const running = S.downloads.filter(d => d.state === 'progressing' || d.state === 'paused').length
   $('#dl-badge').textContent = running ? String(running) : ''
@@ -277,7 +298,7 @@ api.on('layout', ({ panes, dir }) => {
     if (dir === 'col') Object.assign(d.style, { left: px(p.x), width: px(p.width), top: px(p.y + p.height), height: px(n.y - p.y - p.height) })
     else Object.assign(d.style, { left: px(p.x + p.width), width: px(n.x - p.x - p.width), top: px(p.y), height: px(p.height) })
     d.title = 'Drag to resize · double-click to make equal'
-    d.onmousedown = (e) => { e.preventDefault(); api.send('split-drag-start', i) }
+    d.onmousedown = (e) => { e.preventDefault(); api.send('split-drag-start', i); follow((ev) => api.send('split-drag', ev.clientX, ev.clientY)) }
     d.ondblclick = () => api.send('split-equalize')
     box.append(d)
   })
@@ -309,19 +330,28 @@ $('#b-claude').onclick = (e) => { e.stopPropagation(); api.send('toggle-chat') }
 $('#b-newspace').onclick = () => api.send('plus-menu', rectOf($('#b-newspace')))
 $('#content').ondblclick = () => api.send('command-bar', 'new')
 
-// hidden sidebar: the left edge opens the floating copy over the page; leaving it closes it
+// hidden sidebar: the left edge opens the floating copy over the page; leaving it closes it.
+// The floating copy slides out the moment the edge is hovered — main just widens its view.
+const peekOn = () => { document.body.classList.add('peek'); api.send('peek', true) }
 if (FLOAT) {
-  $('#sidebar').onmouseenter = () => api.send('peek', true)
+  $('#peek-edge').onmouseenter = peekOn
+  $('#sidebar').onmouseenter = () => { if (document.body.classList.contains('peek')) api.send('peek', true) }
   $('#sidebar').onmouseleave = () => api.send('peek', false)
   document.documentElement.onmouseleave = () => api.send('peek', false)
+  api.on('sidebar-peek', (on) => document.body.classList.toggle('peek', !!on))
 } else $('#peek-edge').onmouseenter = () => api.send('peek', true)
 
-// sidebar resizing
+// Drags that start here (sidebar edge, split dividers) follow the mouse from this page until release;
+// main also lays a shield over the pages so the drag isn't lost when the pointer crosses them
+function follow (move) {
+  let last = 0
+  const mv = (ev) => { const now = performance.now(); if (now - last > 12) { last = now; move(ev) } }
+  const up = (ev) => { move(ev); removeEventListener('mousemove', mv); removeEventListener('mouseup', up); api.send('split-drag-end') }
+  addEventListener('mousemove', mv); addEventListener('mouseup', up)
+}
 $('#resizer').onmousedown = (e) => {
-  e.preventDefault()
-  const move = (ev) => api.send('sidebar-width', ev.clientX)
-  const up = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', up) }
-  addEventListener('mousemove', move); addEventListener('mouseup', up)
+  e.preventDefault(); api.send('sidebar-resize-start')
+  follow((ev) => api.send('sidebar-width', ev.clientX))
 }
 
 setupDropzones()

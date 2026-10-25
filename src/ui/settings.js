@@ -3,10 +3,24 @@ const api = window.drift
 const $ = (s) => document.querySelector(s)
 let D = null; let current = 'general'
 
+// [id, icon, tab label, window title]
 const PAGES = [
-  ['general', '⚙', 'General'], ['profiles', '◉', 'Profiles'], ['spaces', '◐', 'Spaces'], ['tidy', '✦', 'Tidy'], ['links', '⧉', 'Links'],
-  ['privacy', '⛨', 'Privacy & Security'], ['integrations', '⌬', 'Integrations'], ['shortcuts', '⌘', 'Shortcuts'], ['icon', '◎', 'Icon'], ['advanced', '☰', 'Advanced']
+  ['general', 'gear', 'General'], ['profiles', 'person', 'Profiles'], ['spaces', 'spaces', 'Spaces'], ['tidy', 'sparkle', 'Tidy'], ['links', 'windows', 'Links'],
+  ['privacy', 'shield', 'Privacy', 'Privacy & Security'], ['integrations', 'plug', 'AI & MCP', 'Integrations'], ['shortcuts', 'keyboard', 'Shortcuts'], ['icon', 'appicon', 'Icon'], ['advanced', 'sliders', 'Advanced']
 ]
+const ICONS = {
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  person: '<circle cx="12" cy="8" r="4"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/>',
+  spaces: '<rect x="7.5" y="7.5" width="13" height="13" rx="3"/><path d="M4 16.5v-10A2.5 2.5 0 0 1 6.5 4h10"/>',
+  sparkle: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/>',
+  windows: '<rect x="3.5" y="7.5" width="13" height="12" rx="2"/><path d="M7.5 7.5v-2a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/>',
+  shield: '<path d="M12 3.5l7 2.5v5.5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/>',
+  plug: '<path d="M9 3.5v4M15 3.5v4"/><path d="M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5v4"/>',
+  keyboard: '<rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M8 14h8"/>',
+  appicon: '<rect x="4" y="4" width="16" height="16" rx="4.5"/><circle cx="12" cy="12" r="3.5"/>',
+  sliders: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>'
+}
+function icon (name) { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.innerHTML = ICONS[name] || ''; return s }
 const HOUR = 3600e3; const MIN = 60e3
 
 function el (tag, attrs = {}, ...kids) {
@@ -186,11 +200,12 @@ function textRow (key, t, ph) {
   return el('div', { class: 'row' }, label(t), i)
 }
 
-function go (p) { current = p; draw() }
+function go (p) { current = p; draw(); scrollTo(0, 0) }
 function draw () {
   if (!D) return
-  $('#tabs').replaceChildren(...PAGES.map(([id, ic, name]) => el('button', { class: id === current ? 'on' : '', onclick: () => go(id) }, el('span', { class: 'ic' }, ic), name)))
-  $('#title').textContent = PAGES.find(p => p[0] === current)[2]
+  $('#tabs').replaceChildren(...PAGES.map(([id, ic, name]) => el('button', { class: id === current ? 'on' : '', onclick: () => go(id) }, icon(ic), name)))
+  const pg = PAGES.find(p => p[0] === current)
+  document.title = $('#title').textContent = pg[3] || pg[2]
   const y = scrollY
   $('#page').replaceChildren(...render[current]())
   scrollTo(0, y)
