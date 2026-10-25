@@ -23,12 +23,14 @@ function rank (list, query, fields, n) {
 function compute () {
   const text = q.value.trim(); const ql = text.toLowerCase(); const s = O.snapshot
   const out = []
-  if (O.mode === 'find' || O.mode === 'prompt') return []
-  if (O.mode === 'pick') return rank(O.items, ql, ['title'], 50).map(i => ({ type: 'pick', value: i.value, title: i.title, color: i.color }))
+  if (O.mode === 'find' || O.mode === 'prompt' || O.mode === 'peek' || O.mode === 'report') return []
+  if (O.mode === 'pick') return rank(O.items, ql, ['title'], 200).map(i => ({ type: 'pick', value: i.value, title: i.title, color: i.color, group: i.group }))
   if (O.mode === 'archive') return rank(s.archive, ql, ['title', 'url'], 60).map(a => ({ type: 'archive', i: a.i, title: a.title, url: a.url, favicon: a.favicon, k: ago(a.archivedAt) }))
   if (text) {
     if (looksUrl(text)) out.push({ type: 'go', text, title: text, k: 'Open' })
     else out.push({ type: 'go', text, title: text, k: `Search ${s.engine}`, icon: '⌕' })
+    if (aiMode || (s.ai && O.mode !== 'split' && !looksUrl(text))) out.splice(aiMode ? 0 : 1, 0, aiResult(text, s.ai || 'claude'))
+    if (aiMode) return out.slice(0, 1)
     for (const g of sugg) if (g.toLowerCase() !== ql) out.push({ type: 'go', text: g, title: g, icon: '⌕' })
   }
   if (O.mode !== 'split') for (const c of rank(s.commands, ql, ['title'], text ? 4 : 0)) out.push({ type: 'command', id: c.id, title: c.title, k: c.keys, icon: '⌘' })
@@ -42,11 +44,25 @@ function compute () {
   if (text) for (const a of rank(s.archive, ql, ['title', 'url'], 3)) out.push({ type: 'archive', i: a.i, title: a.title, url: a.url, favicon: a.favicon, k: 'Archived' })
   return out
 }
+const AI = { claude: ['Claude', null], chatgpt: ['ChatGPT', 'https://chatgpt.com/?q='], perplexity: ['Perplexity', 'https://www.perplexity.ai/search?q='] }
+let aiMode = null
+function aiResult (text, provider) {
+  const [name, url] = AI[provider] || AI.claude
+  return url ? { type: 'go', url: url + encodeURIComponent(text), title: `Ask ${name}: ${text}`, icon: '✳', k: 'Tab' } : { type: 'claude', text, title: `Ask Claude: ${text}`, icon: '✳', k: 'In Drift' }
+}
 function ago (t) { const m = (Date.now() - t) / 60e3; return m < 60 ? `${Math.round(m)}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago` }
 
 function render () {
   results = compute(); sel = Math.min(sel, Math.max(0, results.length - 1))
-  resEl.replaceChildren(...results.map((r, i) => {
+  let lastGroup = null; const nodes = []
+  results.forEach((r, i) => {
+    if (r.group && r.group !== lastGroup) { lastGroup = r.group; const h = document.createElement('div'); h.className = 'grp'; h.textContent = r.group; nodes.push(h) }
+    nodes.push(row(r, i))
+  })
+  resEl.replaceChildren(...nodes)
+}
+function row (r, i) {
+  {
     const el = document.createElement('div'); el.className = 'r' + (i === sel ? ' sel' : '')
     if (r.color) { const c = document.createElement('span'); c.className = 'sw'; c.style.background = r.color; el.append(c) } else if (r.favicon && /^(https:|data:image)/.test(r.favicon)) { const im = document.createElement('img'); im.src = r.favicon; im.onerror = () => { const ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = '○'; im.replaceWith(ic) }; el.append(im) } else { const ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = r.icon || '○'; el.append(ic) }
     const t = document.createElement('span'); t.className = 't'; t.textContent = r.title || r.url; el.append(t)
@@ -55,16 +71,18 @@ function render () {
     el.onmousemove = () => { if (sel !== i) { sel = i; mark() } }
     el.onclick = () => { sel = i; submit() }
     return el
-  }))
+  }
 }
-function mark () { [...resEl.children].forEach((c, i) => c.classList.toggle('sel', i === sel)); resEl.children[sel]?.scrollIntoView({ block: 'nearest' }) }
+function mark () { const rows = [...resEl.querySelectorAll('.r')]; rows.forEach((c, i) => c.classList.toggle('sel', i === sel)); rows[sel]?.scrollIntoView({ block: 'nearest' }) }
 
 function submit (shift) {
   if (O.mode === 'find') return api.send('find', q.value, { forward: !shift, findNext: true })
   if (O.mode === 'prompt') return api.send('prompt-result', O.key, q.value.trim())
   const r = results[sel]
   if (O.mode === 'pick') return r && api.send('prompt-result', O.key, r.value)
-  if (!r) { if (q.value.trim()) api.send('palette-submit', { type: 'go', text: q.value }); else close(); return }
+  const text = q.value.trim()
+  if (shift && O.snapshot.instant && text && !looksUrl(text) && ['new', 'edit'].includes(O.mode) && !aiMode) return api.send('instant', text)
+  if (!r) { if (text) api.send('palette-submit', { type: 'go', text: q.value }); else close(); return }
   api.send('palette-submit', r)
 }
 function close () { if (O?.mode === 'prompt' || O?.mode === 'pick') api.send('prompt-result', O.key, null); else api.send('overlay-close') }
@@ -80,15 +98,24 @@ q.addEventListener('input', () => {
   } else sugg = []
 })
 q.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab' && O.snapshot.ai && !aiMode && ['new', 'edit'].includes(O.mode)) {
+    const name = (AI[O.snapshot.ai] || AI.claude)[0].toLowerCase()
+    if (q.value.trim().toLowerCase() === name || q.value.trim().toLowerCase() === 'claude') {
+      e.preventDefault(); aiMode = q.value.trim().toLowerCase() === 'claude' ? 'claude' : O.snapshot.ai; O.snapshot.ai = aiMode
+      document.getElementById('title').textContent = 'Ask ' + AI[aiMode][0]; document.getElementById('glyph').textContent = '✳'; q.value = ''; q.placeholder = 'Ask anything…'; render(); return
+    }
+  }
   if (e.key === 'Escape') { e.preventDefault(); close() } else if (e.key === 'Enter') { e.preventDefault(); submit(e.shiftKey) } else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); sel = Math.min(sel + 1, results.length - 1); mark() } else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); sel = Math.max(sel - 1, 0); mark() }
 })
 document.getElementById('backdrop').onmousedown = close
 
 const TITLES = { split: 'Open in split view', archive: 'Archived tabs', edit: '' , new: '' }
 api.on('open', (o) => {
-  O = o; sel = 0; sugg = []
+  O = o; sel = 0; sugg = []; aiMode = null
   document.documentElement.style.setProperty('--space', o.snapshot.color)
-  document.body.className = o.mode === 'find' ? 'find' : ''
+  document.body.className = ['find', 'peek', 'report'].includes(o.mode) ? o.mode : ''
+  if (o.mode === 'peek') { document.getElementById('peekurl').textContent = o.query; document.getElementById('peektitle').textContent = '' }
+  if (o.mode === 'report') renderReport(o.report)
   document.getElementById('title').textContent = o.title || TITLES[o.mode] || ''
   document.getElementById('glyph').textContent = o.mode === 'find' ? '⌕' : o.mode === 'prompt' ? '✎' : o.mode === 'split' ? '◫' : '⌕'
   document.getElementById('count').textContent = ''
@@ -98,3 +125,28 @@ api.on('open', (o) => {
   render(); q.focus(); q.select()
 })
 api.on('find-result', (r) => { if (r.finalUpdate) document.getElementById('count').textContent = r.matches ? `${r.activeMatchOrdinal}/${r.matches}` : 'No matches' })
+
+api.on('peek-title', (t) => { document.getElementById('peektitle').textContent = t })
+document.getElementById('peek-open').onclick = () => api.send('peek-open-tab')
+document.getElementById('peek-split').onclick = () => api.send('peek-split')
+document.getElementById('peek-close').onclick = () => api.send('overlay-close')
+document.getElementById('report-close').onclick = () => api.send('overlay-close')
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && O && (O.mode === 'peek' || O.mode === 'report')) api.send('overlay-close') })
+
+function renderReport (r) {
+  const box = document.getElementById('report-body')
+  document.getElementById('report-title').textContent = 'Site Inspector — ' + r.title
+  box.replaceChildren(...r.sections.map(sec => {
+    const s = document.createElement('section')
+    const h = document.createElement('h3'); h.textContent = sec.title
+    if (sec.grade) { const g = document.createElement('span'); g.className = 'grade g' + sec.grade[0]; g.textContent = sec.grade; h.prepend(g) }
+    s.append(h)
+    for (const [k, v, st] of sec.rows) {
+      const row = document.createElement('div'); row.className = 'kv ' + (st || '')
+      const a = document.createElement('span'); a.className = 'k'; a.textContent = k
+      const b = document.createElement('span'); b.className = 'v'; b.textContent = v
+      row.append(a, b); s.append(row)
+    }
+    return s
+  }))
+}

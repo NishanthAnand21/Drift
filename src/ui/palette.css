@@ -22,3 +22,23 @@ body.find #backdrop{display:none}
 body.find #box{left:0;top:0;transform:none;width:100%;animation:none;border-radius:11px}
 body.find .in{height:48px}
 body.find #q{font-size:14px}
+
+.grp{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:10px 18px 4px}
+#peekbar,#report{display:none}
+body.peek #box,body.report #box{display:none}
+body.peek #backdrop{background:#0006}
+body.peek #peekbar{display:flex;align-items:center;gap:8px;position:fixed;left:11vw;right:11vw;top:calc(9vh - 6px);height:34px;padding:0 6px 0 14px;border-radius:10px;background:#1e1c24eb;color:#fff;font-size:12.5px;box-shadow:0 6px 20px #0004}
+#peektitle{font-weight:600;max-width:40%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#peekurl{flex:1;opacity:.7;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#peekbar button,#report header button{border:0;background:#ffffff26;color:inherit;font:inherit;border-radius:7px;padding:4px 10px}
+#peekbar button:hover{background:#ffffff40}
+body.report #report{display:flex;flex-direction:column;position:absolute;left:50%;top:6vh;transform:translateX(-50%);width:min(760px,94vw);max-height:88vh;background:var(--bg);border-radius:14px;box-shadow:0 20px 60px #0005;overflow:hidden}
+#report header{display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid #8882}
+#report header b{flex:1}#report header button{background:#8882}
+#report-body{overflow:auto;padding:4px 18px 18px;user-select:text}
+#report h3{font-size:13px;margin:16px 0 6px;display:flex;align-items:center;gap:8px}
+.kv{display:flex;gap:12px;font-size:12.5px;padding:5px 0;border-top:1px solid #8881}
+.kv .k{flex:0 0 34%;color:var(--muted);overflow-wrap:anywhere}.kv .v{flex:1;overflow-wrap:anywhere;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.kv.ok .k::before{content:"● ";color:#16a34a}.kv.weak .k::before{content:"● ";color:#f5a524}.kv.bad .k::before{content:"● ";color:#e5484d}
+.grade{display:inline-grid;place-items:center;min-width:30px;height:24px;border-radius:6px;color:#fff;font-size:12px;padding:0 6px}
+.gA{background:#16a34a}.gB{background:#65a30d}.gC{background:#f5a524}.gD{background:#ea580c}.gF{background:#e5484d}

@@ -13,22 +13,23 @@
     <button class="ib" id="b-sidebar" title="Toggle sidebar (⌘S)">◧</button>
     <span class="flex"></span>
     <browser-action-list id="exts" alignment="bottom right"></browser-action-list>
+    <button class="ib" id="b-claude" title="Ask Claude (⌘E)">✳</button>
     <button class="ib" id="b-back" title="Back (⌘[)">←</button>
     <button class="ib" id="b-fwd" title="Forward (⌘])">→</button>
     <button class="ib" id="b-reload" title="Reload (⌘R)">↻</button>
   </div>
-  <div id="urlbar" title="Edit URL (⌘L)"><span id="shield" title="Trackers blocked on this page"></span><span id="url-text"></span></div>
+  <div id="urlbar" title="Edit URL (⌘L)"><span id="shield" title="Site Inspector — security & tech stack (⌘⇧I)">ⓘ</span><span id="blocked"></span><span id="url-text"></span></div>
   <div id="favorites" class="dropzone" data-zone="favorite"></div>
   <div id="scroll">
     <div id="space-name"></div>
     <div id="pinned" class="dropzone list" data-zone="pinned"></div>
-    <div class="divider"><span></span><button id="b-clear" title="Archive all unpinned tabs">↓ Clear</button></div>
+    <div class="divider"><span></span><button id="b-tidy" title="Tidy: group by site, archive duplicates">✧ Tidy</button><button id="b-clear" title="Archive all unpinned tabs">↓ Clear</button></div>
     <button id="b-newtab" class="row newtab">＋ New Tab</button>
     <div id="today" class="dropzone list" data-zone="today"></div>
   </div>
   <div id="downloads"></div>
   <div class="bottom">
-    <button class="ib" id="b-archive" title="Archived tabs (⌘⇧A)">⌂</button>
+    <button class="ib" id="b-archive" title="Library: downloads, media, spaces, boosts, archive">▤</button>
     <div id="spaces"></div>
     <button class="ib" id="b-newspace" title="New space">＋</button>
   </div>

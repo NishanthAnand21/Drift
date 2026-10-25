@@ -43,6 +43,7 @@ function favTile (t) {
 }
 function bindTab (el, t) {
   el.onclick = () => api.send('activate', t.id)
+  el.ondblclick = (e) => { e.preventDefault(); api.send('rename', t.id) }
   el.onauxclick = (e) => { if (e.button === 1) api.send('close', t.id) }
   el.oncontextmenu = (e) => { e.preventDefault(); api.send('tab-menu', t.id) }
   el.ondragstart = (e) => { dragId = t.id; el.classList.add('dragging'); e.dataTransfer.setData('text/plain', t.url); e.dataTransfer.effectAllowed = 'move' }
@@ -94,7 +95,9 @@ function render () {
   $('#b-fwd').disabled = !S.nav.canFwd
   $('#b-reload').textContent = S.nav.loading ? '✕' : '↻'
   $('#url-text').textContent = S.nav.url ? host(S.nav.url) : 'Search or enter URL…'
-  $('#shield').textContent = S.nav.blocked ? String(S.nav.blocked) : ''
+  $('#blocked').textContent = S.nav.blocked ? String(S.nav.blocked) : ''
+  document.body.classList.toggle('tidy', !!S.tidyTabs && S.today.length > 6)
+  document.body.classList.toggle('chat', !!S.chatOpen)
 
   $('#favorites').replaceChildren(...S.favorites.map(favTile))
   const nm = $('#space-name'); nm.textContent = sp.name
@@ -136,7 +139,10 @@ $('#b-reload').onclick = () => api.send('reload')
 $('#urlbar').onclick = () => api.send('command-bar', 'edit')
 $('#b-newtab').onclick = () => api.send('command-bar', 'new')
 $('#b-clear').onclick = () => api.send('clear-today')
-$('#b-archive').onclick = () => api.send('show-archive')
+$('#b-archive').onclick = () => api.send('library')
+$('#b-tidy').onclick = () => api.send('tidy-tabs')
+$('#b-claude').onclick = () => api.send('toggle-chat')
+$('#shield').onclick = (e) => { e.stopPropagation(); api.send('inspect') }
 $('#b-newspace').onclick = () => api.send('new-space')
 $('#content').ondblclick = () => api.send('command-bar', 'new')
 

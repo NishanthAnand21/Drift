@@ -3,6 +3,15 @@
 // strong-password generator. Page scripts cannot reach this code or the IPC bridge.
 const { ipcRenderer } = require('electron')
 
+// Shift+click a link → Peek (preview without opening a tab)
+document.addEventListener('click', (e) => {
+  if (!e.isTrusted || !e.shiftKey || e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey) return
+  const a = e.target.closest?.('a[href]')
+  if (!a || !/^https?:/.test(a.href)) return
+  e.preventDefault(); e.stopImmediatePropagation()
+  ipcRenderer.send('peek-link', a.href)
+}, true)
+
 const secureCtx = location.protocol === 'https:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
 if (secureCtx) {
   let host = null; let shadow = null; let menuFor = null

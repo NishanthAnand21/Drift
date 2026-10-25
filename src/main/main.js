@@ -1,7 +1,7 @@
 'use strict'
 const {
   app, BrowserWindow, WebContentsView, Menu, ipcMain, session, dialog, shell,
-  clipboard, net, nativeTheme, desktopCapturer
+  clipboard, net, nativeTheme, desktopCapturer, globalShortcut, nativeImage
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -11,6 +11,10 @@ const { Store } = require('./store')
 const { isBlockedHost } = require('./blocker')
 const { createPasswords } = require('./passwords')
 const sync = require('./sync')
+const adblock = require('./adblock')
+const inspector = require('./inspector')
+const { startMcp } = require('./mcp')
+const { createClaudeChat, MODELS: CLAUDE_MODELS } = require('./claude')
 
 const isMac = process.platform === 'darwin'
 const UI_DIR = path.join(__dirname, '..', 'ui')
@@ -27,6 +31,7 @@ app.commandLine.appendSwitch('enable-features', 'StrictOriginIsolation')
 
 // Private windows run as a separate process with throw-away, in-memory storage
 const PRIVATE = process.argv.includes('--drift-private')
+const LATE_ACTIONS = {} // UI actions declared next to their feature; merged into ACTIONS below
 let privateDir = null
 if (PRIVATE) {
   privateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-private-'))
@@ -54,8 +59,37 @@ const DEFAULTS = {
     blocker: true,
     httpsOnly: true,
     suggestions: true,
-    sidebarWidth: 260
+    sidebarWidth: 260,
+    autoUpdate: true,
+    warnBeforeQuit: true,
+    restoreSession: true,
+    strictBlocking: false,
+    proxyMode: 'system',
+    proxyRules: '',
+    proxyBypass: '',
+    proxyPac: '',
+    downloadMode: 'downloads',
+    downloadDir: null,
+    memorySaverMs: 30 * 60e3,
+    tidyTabs: true,
+    instantLinks: true,
+    tidyTitles: true,
+    tidyDownloads: true,
+    aiInCommandBar: true,
+    aiProvider: 'claude',
+    miniHotkey: true,
+    miniForExternal: false,
+    peekShift: true,
+    peekFromPinned: true,
+    pipOnLeave: true,
+    boostsEnabled: true,
+    icon: 'aurora',
+    mcpEnabled: false,
+    claudeModel: 'claude-opus-5-5',
+    claudeEffort: 'medium',
+    mcpReadPages: false
   },
+  boosts: {},
   profiles: [{ id: 'default', name: 'Personal', favorites: [] }],
   spaces: [{ id: 'home', name: 'Home', color: COLORS[0], profileId: 'default', pinned: [], today: [], activeTabId: null, split: null }],
   tabs: {},
@@ -193,13 +227,20 @@ function setupSession (ses) {
       }
       return cb({})
     }
-    if (S.settings.blocker && isBlockedHost(u.hostname)) {
+    if (S.settings.blocker) {
       const tabId = wcToTab.get(details.webContentsId)
-      if (tabId && live.get(tabId)) { live.get(tabId).blocked++; pushStateSoon() }
-      return cb({ cancel: true })
+      const verdict = adblock.match(details, tab(tabId)?.url) || (isBlockedHost(u.hostname) ? { cancel: true } : null)
+      if (verdict) {
+        if (tabId && live.get(tabId)) { live.get(tabId).blocked++; pushStateSoon() }
+        return cb(verdict)
+      }
     }
     cb({})
   })
+  ses.webRequest.onHeadersReceived((details, cb) => { inspector.recordResponse(details); cb({}) })
+  ses.webRequest.onCompleted((details) => inspector.recordIp(details))
+  ses.setCertificateVerifyProc((req, cb) => { inspector.recordCert(req); cb(-3) })
+  applyProxy(ses)
   // Strip a few tracking headers
   ses.webRequest.onBeforeSendHeaders((details, cb) => {
     const h = details.requestHeaders
@@ -207,9 +248,19 @@ function setupSession (ses) {
     cb({ requestHeaders: h })
   })
 
-  ses.on('will-download', (_e, item) => {
-    const dir = app.getPath('downloads')
+  ses.on('will-download', (_e, item, wc) => {
+    const dir = S.settings.downloadMode === 'custom' && S.settings.downloadDir && fs.existsSync(S.settings.downloadDir) ? S.settings.downloadDir : app.getPath('downloads')
     let name = item.getFilename().replace(/[/\\]/g, '_')
+    const tidied = S.settings.tidyDownloads ? tidyDownloadName(name, wc && !wc.isDestroyed() ? (tab(wcToTab.get(wc.id))?.title || wc.getTitle()) : '') : null
+    if (tidied) { toast(`Download renamed to ${tidied}`); name = tidied }
+    if (S.settings.downloadMode === 'ask') {
+      item.setSaveDialogOptions({ defaultPath: path.join(dir, name) })
+      const d = { id: uid('d'), name, path: '', received: 0, total: item.getTotalBytes(), state: 'progressing' }
+      downloads.unshift(d)
+      item.on('updated', (_e2, state) => { d.received = item.getReceivedBytes(); d.state = state; d.path = item.getSavePath(); d.name = path.basename(d.path || name); pushStateSoon() })
+      item.once('done', (_e2, state) => { d.state = state; d.path = item.getSavePath(); pushState(); if (state === 'completed') toast(`Downloaded ${d.name}`) })
+      return
+    }
     let target = path.join(dir, name)
     const ext = path.extname(name); const base = path.basename(name, ext)
     for (let i = 1; fs.existsSync(target); i++) target = path.join(dir, `${base} (${i})${ext}`)
@@ -229,6 +280,50 @@ function setupSession (ses) {
   })
   ses.setSpellCheckerEnabled(true)
   if (!PRIVATE) setupExtensions(ses)
+}
+
+function applyProxy (ses) {
+  const st = S.settings
+  const cfg = { mode: st.proxyMode || 'system' }
+  if (cfg.mode === 'fixed_servers') { cfg.proxyRules = st.proxyRules || ''; cfg.proxyBypassRules = st.proxyBypass || '<local>' }
+  if (cfg.mode === 'pac_script') cfg.pacScript = st.proxyPac || ''
+  if ((cfg.mode === 'fixed_servers' && !cfg.proxyRules) || (cfg.mode === 'pac_script' && !cfg.pacScript)) cfg.mode = 'system'
+  // command-line --proxy-server (used for testing/managed setups) wins over UI settings
+  if (app.commandLine.hasSwitch('proxy-server')) return
+  ses.setProxy(cfg).catch(() => {})
+}
+
+// ---------------------------------------------------------------- tidy helpers
+function tidyDownloadName (name, pageTitle) {
+  const ext = path.extname(name); const base = path.basename(name, ext)
+  const meaningless = /^[\d_-]{5,}$|^[a-f0-9-]{16,}$|^(download|file|document|untitled|image|attachment|export)(\s*\(\d+\))?$/i.test(base)
+  if (!meaningless || !pageTitle) return null
+  const clean = tidyTitle(pageTitle).replace(/[\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80)
+  return clean ? clean + ext : null
+}
+function tidyTitle (title, url) {
+  if (!title) return title
+  let t = title.replace(/^\(\d+\+?\)\s*/, '').replace(/\s+/g, ' ').trim()
+  let host = ''; try { host = new URL(url).hostname.replace(/^www\./, '').split('.')[0].toLowerCase() } catch {}
+  const parts = t.split(/\s+[|\-–—·•:]\s+/)
+  if (parts.length > 1) {
+    const last = parts[parts.length - 1]
+    if (parts.length > 2 || last.length <= 30 || (host && last.toLowerCase().replace(/\s/g, '').includes(host))) parts.pop()
+    t = parts.join(' – ')
+  }
+  return t.length > 48 ? t.slice(0, 46).trim() + '…' : t
+}
+function tidyTabs () {
+  const sp = space()
+  const seen = new Set(); let dupes = 0
+  for (const id of [...sp.today]) {
+    const t = tab(id); if (!t) continue
+    if (seen.has(t.url) && id !== sp.activeTabId) { sp.today.splice(sp.today.indexOf(id), 1); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]; dupes++ } else seen.add(t.url)
+  }
+  const hostOf = (id) => { try { return new URL(tab(id).url).hostname.replace(/^www\./, '') } catch { return '' } }
+  const order = []; for (const id of sp.today) { const h = hostOf(id); if (!order.includes(h)) order.push(h) }
+  sp.today.sort((a, b) => order.indexOf(hostOf(a)) - order.indexOf(hostOf(b)))
+  store.save(); pushState(); toast(`Tidied: grouped by site${dupes ? `, archived ${dupes} duplicate${dupes > 1 ? 's' : ''}` : ''}`)
 }
 
 // ---------------------------------------------------------------- Chrome extensions
@@ -359,6 +454,12 @@ function wireWebContents (tabId, wc) {
     pushStateSoon()
   }
   wc.on('did-start-loading', () => { if (st()) st().loading = true; pushStateSoon() })
+  wc.on('dom-ready', () => {
+    const url = wc.getURL()
+    if (S.settings.blocker) { const css = adblock.cosmeticCss(url); if (css) wc.insertCSS(css).catch(() => {}) }
+    const boost = boostFor(url); if (boost) wc.insertCSS(boost, { cssOrigin: 'user' }).catch(() => {})
+  })
+  wc.once('destroyed', () => inspector.forget(wc.id))
   wc.on('did-stop-loading', () => { if (st()) st().loading = false; updateNav() })
   wc.on('did-navigate', (_e, url) => {
     if (url.startsWith('file:')) return updateNav() // our error page
@@ -400,7 +501,17 @@ function wireWebContents (tabId, wc) {
     } catch {}
     wc.loadFile(ERROR_PAGE, { query: { kind: 'error', url, code: String(code), desc } })
   })
-  wc.on('will-navigate', (e) => guardNavigation(e, e.url, wc))
+  wc.on('will-navigate', (e) => {
+    guardNavigation(e, e.url, wc)
+    if (e.defaultPrevented || !S.settings.peekFromPinned || !e.isMainFrame) return
+    const loc = locate(tabId)
+    if (!loc || loc.type === 'today' || !/^https?:/.test(e.url)) return
+    try {
+      const { getDomain } = require('tldts-experimental')
+      const from = getDomain(wc.getURL()); const to = getDomain(e.url)
+      if (from && to && from !== to) { e.preventDefault(); openPeek(e.url) }
+    } catch {}
+  })
   wc.on('will-redirect', (e) => {
     if (!/^(https?|about|data):/i.test(e.url)) e.preventDefault()
   })
@@ -512,10 +623,15 @@ function activateTab (tabId) {
   if (sp.split && sp.split.a !== tabId && sp.split.b !== tabId && sp.activeTabId && (sp.activeTabId === sp.split.a || sp.activeTabId === sp.split.b)) {
     // leaving a split keeps it intact; it reappears when either side is activated
   }
+  const prev = sp.activeTabId
+  if (S.settings.pipOnLeave && prev && prev !== tabId && views.has(prev) && live.get(prev)?.audible && !(sp.split && [sp.split.a, sp.split.b].includes(prev) && [sp.split.a, sp.split.b].includes(tabId))) {
+    views.get(prev).webContents.executeJavaScript(`(() => { const v = [...document.querySelectorAll('video')].find(v => !v.paused && v.readyState > 2); if (v && !document.pictureInPictureElement && !v.disablePictureInPicture) v.requestPictureInPicture().catch(() => {}) })()`, true).catch(() => {})
+  }
   sp.activeTabId = tabId
   tab(tabId).lastActiveAt = Date.now()
   ensureView(tabId)
   try { extFor(tabId)?.selectTab(views.get(tabId).webContents) } catch {}
+  if (chatOpen) chatView?.webContents.send('chat', 'page', tab(tabId).customTitle || tab(tabId).title)
   layout()
   if (!overlayOpen) views.get(tabId)?.webContents.focus()
   store.save()
@@ -562,7 +678,22 @@ function archiveEntry (t, spaceId) {
   S.archive.length = Math.min(S.archive.length, 500)
 }
 
+function memorySaver () {
+  const limit = S.settings.memorySaverMs
+  if (!limit) return
+  const now = Date.now()
+  const visible = new Set(win ? win.contentView.children : [])
+  for (const [id, v] of [...views]) {
+    const t = tab(id); const l = live.get(id)
+    if (!t || visible.has(v) || l?.audible || now - (t.lastActiveAt || 0) < limit) continue
+    if (v.webContents.isCurrentlyAudible?.() || v.webContents.isDevToolsOpened()) continue
+    destroyView(id)
+  }
+  pushStateSoon()
+}
+
 function autoArchive () {
+  memorySaver()
   const limit = S.settings.archiveAfterMs
   if (!limit) return
   const now = Date.now()
@@ -610,6 +741,8 @@ function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId } = {}) {
   if (index < 0 || index > list.length) index = to === 'today' && loc.type !== 'today' ? 0 : list.length
   list.splice(index, 0, tabId)
   t.pinnedUrl = to === 'today' ? undefined : (t.pinnedUrl || t.url)
+  if (to !== 'today' && loc.type === 'today' && S.settings.tidyTitles && !t.customTitle) t.customTitle = tidyTitle(t.title, t.url)
+  if (to === 'today') delete t.customTitle
   if (loc.space && loc.space.id !== sp.id && loc.space.activeTabId === tabId) loc.space.activeTabId = pickNeighbor(loc.space, tabId)
   if (loc.space?.split && (loc.space.split.a === tabId || loc.space.split.b === tabId) && loc.space.id !== sp.id) loc.space.split = null
   // crossing profiles requires a fresh view in the new session
@@ -730,7 +863,9 @@ function layout () {
   for (const [id, v] of views) if (!needed.includes(id)) { try { win.contentView.removeChildView(v) } catch {} }
   const sw = sidebarShown() ? S.settings.sidebarWidth : 0
   const x0 = sw || PAD
-  const area = { x: x0, y: PAD, width: Math.max(100, w - x0 - PAD), height: Math.max(100, h - PAD * 2) }
+  const chatW = chatOpen && !htmlFullscreen ? CHAT_W + 6 : 0
+  const area = { x: x0, y: PAD, width: Math.max(100, w - x0 - PAD - chatW), height: Math.max(100, h - PAD * 2) }
+  if (chatOpen && chatView && !htmlFullscreen) { win.contentView.addChildView(chatView); chatView.setBounds({ x: w - PAD - CHAT_W, y: PAD, width: CHAT_W, height: h - PAD * 2 }) }
   needed.forEach((id, i) => {
     const v = ensureView(id)
     win.contentView.addChildView(v)
@@ -741,7 +876,7 @@ function layout () {
       v.setBounds(i === 0 ? { ...area, width: lw } : { ...area, x: area.x + lw + gap, width: area.width - lw - gap })
     } else v.setBounds(area)
   })
-  if (overlayOpen) { win.contentView.addChildView(overlay); overlay.setBounds(overlayBounds()) }
+  if (overlayOpen) { win.contentView.addChildView(overlay); overlay.setBounds(overlayBounds()); if (peekView && overlayOpen.mode === 'peek') win.contentView.addChildView(peekView) }
   win.webContents.send('layout', { area, splitIds: needed.length === 2 ? needed : null })
 }
 
@@ -749,6 +884,7 @@ function layout () {
 function overlayBounds () {
   const [w, h] = win.getContentSize()
   if (overlayOpen?.mode === 'find') return { x: w - 380, y: 14, width: 360, height: 64 }
+  if (peekView && overlayOpen?.mode === 'peek') { const pb = peekBounds(); peekView.setBounds(pb) }
   return { x: 0, y: 0, width: w, height: h }
 }
 
@@ -776,6 +912,7 @@ function openOverlay (opts) {
 
 function closeOverlay () {
   if (!overlayOpen) return
+  if (overlayOpen.mode === 'peek') destroyPeek()
   const wasFind = overlayOpen.mode === 'find'
   overlayOpen = null
   try { win.contentView.removeChildView(overlay) } catch {}
@@ -813,6 +950,8 @@ function paletteSnapshot () {
     commands: COMMANDS.map(c => ({ id: c.id, title: typeof c.title === 'function' ? c.title() : c.title, keys: c.keys || '' })),
     color: sp.color,
     engine: ENGINES[S.settings.searchEngine].name,
+    ai: S.settings.aiInCommandBar ? S.settings.aiProvider : null,
+    instant: S.settings.instantLinks,
     suggestions: S.settings.suggestions
   }
 }
@@ -862,8 +1001,27 @@ const COMMANDS = [
   { id: 'ext-manage', title: 'Manage Extensions…', run: () => setTimeout(manageExtensions) },
   { id: 'ext-unpacked', title: 'Load Unpacked Extension…', run: loadUnpacked },
   { id: 'sync-setup', title: () => S.sync.enabled ? `Sync: On (${path.basename(S.sync.folder || '')}) — Turn Off` : 'Set Up Sync…', run: () => S.sync.enabled ? disableSync() : setTimeout(setupSync) },
-  { id: 'sync-now', title: 'Sync Now', run: () => runSync(true) }
+  { id: 'sync-now', title: 'Sync Now', run: () => runSync(true) },
+  { id: 'settings', title: 'Settings…', keys: '⌘,', run: () => openSettings() },
+  { id: 'inspect', title: 'Site Inspector — certificate, security headers, cookies, tech stack', keys: '⌘⇧I', run: () => setTimeout(openInspector) },
+  { id: 'library', title: 'Library — downloads, media, archive, spaces, boosts', run: () => setTimeout(openLibrary) },
+  { id: 'tidy', title: 'Tidy Tabs', run: tidyTabs },
+  { id: 'mini', title: 'New Little Window', keys: '⌥⌘N', run: () => openMini() },
+  { id: 'boost', title: 'Boost This Site…', run: () => setTimeout(boostSite) },
+  { id: 'export-data', title: 'Export Data…', run: () => exportData() },
+  { id: 'claude', title: 'Ask Claude (chat panel)', keys: '⌘E', run: () => toggleChat(true) },
+  { id: 'claude-key', title: 'Set Claude API Key…', run: () => setTimeout(promptClaudeKey) }
 ]
+function promptClaudeKey () {
+  win.focus()
+  prompt('Claude API key (from console.anthropic.com) — stored encrypted in your Keychain; leave empty to remove', '', (k) => {
+    if (k == null) return
+    k = k.trim()
+    if (k && !/^sk-ant-[\w-]{20,}$/.test(k)) return toast('That doesn’t look like a Claude API key (sk-ant-…)')
+    setClaudeKey(k || null); toast(k ? 'Claude API key saved' : 'Claude API key removed'); sendSettings()
+    chatView?.webContents.send('chat', 'init', chatInit())
+  }, { secret: true })
+}
 function archiveLabel (ms) {
   if (!ms) return 'Never'
   const h = ms / HOUR
@@ -950,7 +1108,13 @@ function runSync (manual = false) {
   try {
     const r = sync.syncNow({ S, passphrase: pass, passwords, newTabId: () => uid('t') })
     store.save()
-    if (r.changed) { sanitizeState(); layout(); pushState() }
+    if (r.changed) {
+      sanitizeState()
+      // tabs removed by another device: unload their pages too
+      for (const id of [...views.keys()]) if (!S.tabs[id]) destroyView(id)
+      for (const sp of S.spaces) if (sp.activeTabId && !S.tabs[sp.activeTabId]) sp.activeTabId = pickNeighbor(sp, null)
+      layout(); pushState()
+    }
     if (r.errors.length) toast('Sync problem: ' + r.errors[0])
     else if (manual) toast(`Synced with ${r.devices} other device${r.devices === 1 ? '' : 's'}`)
   } catch (e) { if (manual) toast('Sync failed: ' + e.message) } finally { syncing = false }
@@ -962,6 +1126,377 @@ function openPrivateWindow () {
   const args = app.isPackaged ? [...flags, '--drift-private'] : [...flags, app.getAppPath(), '--drift-private']
   const env = { ...process.env }; delete env.DRIFT_SELFTEST
   spawn(process.execPath, args, { detached: true, stdio: 'ignore', env }).unref()
+}
+
+// ---------------------------------------------------------------- Peek
+let peekView = null
+function peekBounds () {
+  const [w, h] = win.getContentSize()
+  const pw = Math.min(1100, Math.round(w * 0.78)); const ph = Math.round(h * 0.82)
+  return { x: Math.round((w - pw) / 2), y: Math.round((h - ph) / 2) + 34, width: pw, height: ph - 34 }
+}
+function openPeek (url) {
+  if (!isSafeWebUrl(url)) return
+  destroyPeek()
+  const pid = space().profileId
+  peekView = new WebContentsView({ webPreferences: { session: getSession(pid), sandbox: true, contextIsolation: true, nodeIntegration: false, safeDialogs: true, preload: WEB_PRELOAD } })
+  peekView.setBorderRadius?.(12)
+  peekView.webContents.setWindowOpenHandler(({ url: u }) => { if (isSafeWebUrl(u)) newTab(u); return { action: 'deny' } })
+  peekView.webContents.on('will-navigate', (e) => guardNavigation(e, e.url, peekView.webContents))
+  peekView.webContents.on('before-input-event', (e, i) => { if (i.type === 'keyDown' && i.key === 'Escape') { e.preventDefault(); closeOverlay() } })
+  peekView.webContents.on('page-title-updated', (_e, t) => overlay?.webContents.send('peek-title', t))
+  peekView.webContents.loadURL(url).catch(() => {})
+  openOverlay({ mode: 'peek', query: url })
+  win.contentView.addChildView(peekView)
+  peekView.setBounds(peekBounds())
+  peekView.webContents.focus()
+}
+function destroyPeek () {
+  if (!peekView) return
+  try { win.contentView.removeChildView(peekView) } catch {}
+  if (!peekView.webContents.isDestroyed()) peekView.webContents.close()
+  peekView = null
+}
+ipcMain.on('peek-link', (e, url) => {
+  if (!wcToTab.has(e.sender.id) || !S.settings.peekShift || typeof url !== 'string') return
+  openPeek(url)
+})
+
+// ---------------------------------------------------------------- Little Window
+const miniWindows = new Set()
+function openMini (url) {
+  const m = new BrowserWindow({
+    width: 860, height: 640, minWidth: 420, minHeight: 300, title: 'Drift', show: false,
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden', trafficLightPosition: { x: 12, y: 12 }, vibrancy: isMac ? 'sidebar' : undefined,
+    backgroundColor: isMac ? '#00000000' : '#efeaf9',
+    webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false }
+  })
+  const view = new WebContentsView({ webPreferences: { session: getSession(space().profileId), sandbox: true, contextIsolation: true, nodeIntegration: false, safeDialogs: true, preload: WEB_PRELOAD } })
+  view.setBorderRadius?.(10)
+  const rec = { win: m, view, ui: m.webContents }
+  miniWindows.add(rec)
+  m.contentView.addChildView(view)
+  const lay = () => { const [w, h] = m.getContentSize(); view.setBounds({ x: 6, y: 38, width: w - 12, height: h - 44 }) }
+  lay(); m.on('resize', lay)
+  m.loadFile(path.join(UI_DIR, 'mini.html'))
+  const wc = view.webContents
+  wc.setWindowOpenHandler(({ url: u }) => { if (isSafeWebUrl(u)) wc.loadURL(u); return { action: 'deny' } })
+  wc.on('will-navigate', (e) => guardNavigation(e, e.url, wc))
+  const send = () => { if (!m.isDestroyed()) m.webContents.send('mini', { url: wc.getURL(), title: wc.getTitle(), canBack: wc.navigationHistory.canGoBack(), loading: wc.isLoading() }) }
+  for (const ev of ['did-navigate', 'did-navigate-in-page', 'page-title-updated', 'did-stop-loading', 'did-start-loading']) wc.on(ev, send)
+  wc.on('did-navigate', (_e, u) => addHistory(u, wc.getTitle()))
+  m.webContents.on('did-finish-load', send)
+  m.once('ready-to-show', () => m.show())
+  m.on('closed', () => { miniWindows.delete(rec); if (!wc.isDestroyed()) wc.close() })
+  if (url) wc.loadURL(url).catch(() => {}); else m.webContents.once('did-finish-load', () => m.webContents.send('mini-focus'))
+  return rec
+}
+LATE_ACTIONS['mini-action'] = (action, arg) => {
+  const rec = [...miniWindows].find(m => m.ui === uiSender); if (!rec) return
+  const wc = rec.view.webContents
+  if (action === 'go') { const u = normalizeInput(String(arg || '')); if (u && isSafeWebUrl(u)) wc.loadURL(u).catch(() => {}) }
+  if (action === 'back') wc.navigationHistory.goBack()
+  if (action === 'reload') wc.reload()
+  if (action === 'open-in-drift') { const u = wc.getURL(); rec.win.close(); if (u && isSafeWebUrl(u)) { newTab(u); win?.show(); win?.focus() } }
+  if (action === 'copy') { clipboard.writeText(wc.getURL()) }
+}
+
+// ---------------------------------------------------------------- Claude chat panel
+let chatView = null
+let chatOpen = false
+const CHAT_W = 380
+const claudeChat = createClaudeChat({
+  getApiKey: () => claudeKey(),
+  send: (type, data) => { if (chatView && !chatView.webContents.isDestroyed()) chatView.webContents.send('chat', type, data) }
+})
+function claudeKey () {
+  const enc = S.claudeKeyEnc; if (!enc) return null
+  try { return enc.startsWith('k:') ? safeStorage.decryptString(Buffer.from(enc.slice(2), 'base64')) : Buffer.from(enc.slice(2), 'base64').toString() } catch { return null }
+}
+function setClaudeKey (key) {
+  S.claudeKeyEnc = key ? (safeStorage.isEncryptionAvailable() ? 'k:' + safeStorage.encryptString(key).toString('base64') : 'p:' + Buffer.from(key).toString('base64')) : null
+  store.save()
+}
+function ensureChatView () {
+  if (chatView) return chatView
+  chatView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+  chatView.setBorderRadius?.(10)
+  chatView.webContents.loadFile(path.join(UI_DIR, 'chat.html'))
+  chatView.webContents.on('will-navigate', e => e.preventDefault())
+  chatView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  return chatView
+}
+function chatInit () {
+  return { models: CLAUDE_MODELS, model: S.settings.claudeModel, hasKey: !!claudeKey() || !!process.env.ANTHROPIC_API_KEY, pageTitle: tab(activeTabId())?.title || '' }
+}
+function toggleChat (force) {
+  chatOpen = typeof force === 'boolean' ? force : !chatOpen
+  if (chatOpen) ensureChatView()
+  else if (chatView) { try { win.contentView.removeChildView(chatView) } catch {} }
+  layout(); pushState()
+  if (chatOpen) chatView.webContents.send('chat', 'focus'); else views.get(activeTabId())?.webContents.focus()
+}
+async function pageForChat () {
+  const v = views.get(activeTabId()); if (!v) return null
+  const wc = v.webContents
+  const text = await Promise.race([
+    wc.executeJavaScriptInIsolatedWorld(998, [{ code: 'document.body ? document.body.innerText : ""' }]).catch(() => ''),
+    new Promise(resolve => setTimeout(() => resolve(''), 5000))
+  ])
+  return { url: wc.getURL(), title: wc.getTitle(), text: String(text || '') }
+}
+Object.assign(LATE_ACTIONS, {
+  'chat-ready': () => chatView?.webContents.send('chat', 'init', chatInit()),
+  'chat-send': async (text, usePage) => {
+    if (typeof text !== 'string' || !text.trim() || uiSender !== chatView?.webContents) return
+    const page = usePage ? await pageForChat() : null
+    claudeChat.ask({ text: text.slice(0, 100000), page, model: S.settings.claudeModel, effort: S.settings.claudeEffort })
+  },
+  'chat-stop': () => claudeChat.stop(),
+  'chat-reset': () => { claudeChat.reset(); chatView?.webContents.send('chat', 'reset') },
+  'chat-close': () => toggleChat(false),
+  'chat-model': (m) => { if (CLAUDE_MODELS.some(([id]) => id === m)) { S.settings.claudeModel = m; store.save(); sendSettings() } },
+  'chat-open-link': (u) => { if (typeof u === 'string' && /^https?:\/\//.test(u)) newTab(u) },
+  'toggle-chat': () => toggleChat()
+})
+
+// ---------------------------------------------------------------- Boosts
+function boostFor (url) {
+  if (!S.settings.boostsEnabled) return ''
+  try { return S.boosts[new URL(url).hostname] || '' } catch { return '' }
+}
+const BOOST_PRESETS = {
+  dark: 'html{filter:invert(.92) hue-rotate(180deg)!important;background:#fff!important}img,video,picture,canvas,iframe,svg image{filter:invert(1) hue-rotate(180deg)!important}',
+  read: 'body{max-width:760px!important;margin:0 auto!important;font-size:19px!important;line-height:1.65!important}aside,nav,footer,[class*=sidebar],[class*=banner],[id*=ad-],[class*=promo]{display:none!important}',
+  bigger: 'html{zoom:1.15}',
+  noimg: 'img,picture,video{visibility:hidden!important}',
+  font: '*:not(code):not(pre):not([class*=icon]){font-family:-apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif!important}'
+}
+function boostSite () {
+  const t = tab(activeTabId()); if (!t) return
+  let host; try { host = new URL(t.url).hostname } catch { return }
+  pick(`Boost ${host}`, [
+    { value: 'dark', title: 'Dark mode' }, { value: 'read', title: 'Reading layout' }, { value: 'bigger', title: 'Bigger text' },
+    { value: 'font', title: 'System font everywhere' }, { value: 'noimg', title: 'Hide images & video' },
+    { value: 'custom', title: 'Custom CSS…' }, ...(S.boosts[host] ? [{ value: 'off', title: 'Remove Boost' }] : [])
+  ], (v) => {
+    const apply = (css) => { if (css) S.boosts[host] = (S.boosts[host] ? S.boosts[host] + '\n' : '') + css; else delete S.boosts[host]; store.save(); views.get(activeTabId())?.webContents.reload(); toast(css ? `Boost applied to ${host}` : 'Boost removed') }
+    if (v === 'off') return apply('')
+    if (v === 'custom') return setTimeout(() => prompt(`Custom CSS for ${host}`, '', (css) => css && apply(css)))
+    apply(BOOST_PRESETS[v])
+  })
+}
+
+// ---------------------------------------------------------------- Library & Inspector
+function openLibrary () {
+  const items = []
+  const media = Object.keys(S.tabs).filter(id => live.get(id)?.audible)
+  for (const id of media) items.push({ group: 'Media', value: 'tab:' + id, title: '♪ ' + (tab(id).customTitle || tab(id).title) })
+  for (const d of downloads.slice(0, 12)) items.push({ group: 'Downloads', value: 'dl:' + d.path, title: `${d.name}${d.state === 'progressing' ? ' — ' + (d.total ? Math.round(d.received / d.total * 100) + '%' : '…') : d.state === 'completed' ? '' : ' — ' + d.state}` })
+  items.push({ group: 'Downloads', value: 'dldir', title: 'Open Downloads folder' })
+  for (const sp of S.spaces) items.push({ group: 'Spaces', value: 'space:' + sp.id, title: sp.name, color: sp.color })
+  for (const [host] of Object.entries(S.boosts)) items.push({ group: 'Boosts', value: 'boost:' + host, title: host })
+  S.archive.slice(0, 25).forEach((a, i) => items.push({ group: 'Archived Tabs', value: 'arch:' + i, title: a.title || a.url }))
+  pick('Library', items, (v) => {
+    const [k, ...rest] = v.split(':'); const arg = rest.join(':')
+    if (k === 'tab') activateTab(arg)
+    if (k === 'dl' && downloads.some(d => d.path === arg)) shell.showItemInFolder(arg)
+    if (k === 'dldir') shell.openPath(S.settings.downloadMode === 'custom' && S.settings.downloadDir ? S.settings.downloadDir : app.getPath('downloads'))
+    if (k === 'space') switchSpace(arg)
+    if (k === 'boost') newTab('https://' + arg)
+    if (k === 'arch') restoreArchived(+arg)
+  })
+}
+async function openInspector () {
+  const id = activeTabId(); const view = views.get(id)
+  if (!view) return toast('Open a page to inspect it')
+  const url = view.webContents.getURL()
+  const r = await inspector.report({ wc: view.webContents, url, ses: view.webContents.session, blocked: live.get(id)?.blocked || 0, permissions: S.permissions[originOf(url)] })
+  openOverlay({ mode: 'report', report: r })
+}
+
+// ---------------------------------------------------------------- Settings window
+let settingsWin = null
+let settingsPage = null
+const ICONS = [['aurora', 'Aurora'], ['midnight', 'Midnight'], ['sunrise', 'Sunrise'], ['mono', 'Graphite']]
+function openSettings (page) {
+  settingsPage = page || null
+  if (settingsWin && !settingsWin.isDestroyed()) { settingsWin.focus(); sendSettings(); return }
+  settingsWin = new BrowserWindow({
+    width: 820, height: 720, minWidth: 640, minHeight: 480, title: 'Settings', show: false,
+    titleBarStyle: isMac ? 'hiddenInset' : 'default', backgroundColor: nativeTheme.shouldUseDarkColors ? '#2b2826' : '#f4f2f7',
+    webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false }
+  })
+  settingsWin.loadFile(path.join(UI_DIR, 'settings.html'))
+  settingsWin.webContents.on('will-navigate', e => e.preventDefault())
+  settingsWin.once('ready-to-show', () => settingsWin.show())
+}
+function mcpBridgePath () { return path.join(__dirname, '..', 'mcp', 'bridge.js') }
+function mcpConfigFile () { return path.join(app.getPath('userData'), 'drift-mcp.json') }
+function settingsData () {
+  const spacesPer = (pid) => S.spaces.filter(s => s.profileId === pid).length
+  const perms = Object.entries(S.permissions).map(([origin, m]) => ({ origin, list: Object.entries(m).map(([k, v]) => `${k}: ${v}`).join(', ') }))
+  const env = { ELECTRON_RUN_AS_NODE: '1', DRIFT_MCP_CONFIG: mcpConfigFile() }
+  const cfg = { mcpServers: { drift: { command: process.execPath, args: [mcpBridgePath()], env } } }
+  return {
+    page: settingsPage,
+    settings: S.settings,
+    version: app.getVersion(),
+    chrome: process.versions.chrome,
+    engines: Object.entries(ENGINES).map(([k, e]) => [k, e.name]),
+    profiles: S.profiles.map(p => ({ id: p.id, name: p.name, spaces: spacesPer(p.id) })),
+    permissions: perms,
+    passwordCount: passwords.count,
+    adblock: adblock.ready ? `Filter lists active (EasyList, EasyPrivacy${S.settings.strictBlocking ? ', annoyances' : ''}) + built-in list` : 'Built-in list active — filter lists download on first run',
+    mcpConfig: JSON.stringify(cfg, null, 2),
+    mcpCli: `claude mcp add drift --env ELECTRON_RUN_AS_NODE=1 --env DRIFT_MCP_CONFIG="${mcpConfigFile()}" -- "${process.execPath}" "${mcpBridgePath()}"`,
+    claudeModels: CLAUDE_MODELS,
+    hasClaudeKey: !!claudeKey(),
+    syncOn: S.sync.enabled,
+    syncStatus: S.sync.enabled ? `On · ${S.sync.folder} · last sync ${S.sync.lastSyncAt ? new Date(S.sync.lastSyncAt).toLocaleTimeString() : 'never'}` : 'Off — encrypted sync through iCloud Drive or any folder',
+    extensions: PRIVATE ? 0 : allExtensions().length,
+    icons: ICONS.map(([id, name]) => ({ id, name, src: `icons/${id}.png` })),
+    shortcuts: [
+      ['⌘T', 'New tab / command bar'], ['⌘L', 'Edit URL'], ['⌘W', 'Close tab'], ['⌘⇧T', 'Reopen closed tab'], ['⌘D', 'Pin / unpin tab'],
+      ['⌘S', 'Toggle sidebar'], ['⌃⇧=', 'Add split view'], ['⌃⇧-', 'Separate split view'], ['⌃1…9', 'Switch space'], ['⌘1…9', 'Jump to tab'],
+      ['⌘⌥←/→', 'Previous / next space'], ['⌃Tab', 'Next tab'], ['⌘F', 'Find in page'], ['⌘⇧C', 'Copy URL'], ['⌘⇧A', 'Archived tabs'],
+      ['⌘⇧N', 'New private window'], ['⌥⌘N', 'Little Window (any app)'], ['⇧-click', 'Peek a link'], ['⌘⇧I', 'Site Inspector'], ['⌘,', 'Settings'], ['⌘⌥I', 'Developer tools']
+    ]
+  }
+}
+function sendSettings () { if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send('settings', settingsData()) }
+const SETTING_TYPES = { searchEngine: 'string', aiProvider: 'string', proxyMode: 'string', proxyRules: 'string', proxyBypass: 'string', proxyPac: 'string', downloadMode: 'string', icon: 'string', claudeModel: 'string', claudeEffort: 'string', archiveAfterMs: 'number', memorySaverMs: 'number' }
+async function setSetting (key, value) {
+  if (!(key in DEFAULTS.settings)) return
+  const type = SETTING_TYPES[key] || 'boolean'
+  if (typeof value !== type) return
+  if (key === 'downloadMode' && value === 'custom') {
+    const r = await dialog.showOpenDialog(settingsWin || win, { properties: ['openDirectory', 'createDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return sendSettings()
+    S.settings.downloadDir = r.filePaths[0]
+  }
+  S.settings[key] = value
+  store.save()
+  if (key.startsWith('proxy')) for (const ses of configuredSessions) applyProxy(ses)
+  if (key === 'strictBlocking' || (key === 'blocker' && value)) adblock.load(app.getPath('userData'), { strictMode: S.settings.strictBlocking }).then(sendSettings)
+  if (key === 'icon') applyIcon()
+  if (key === 'miniHotkey') registerHotkeys()
+  if (key === 'mcpEnabled') setupMcp()
+  if (key === 'claudeModel') chatView?.webContents.send('chat', 'init', chatInit())
+  if (key === 'archiveAfterMs' || key === 'memorySaverMs') autoArchive()
+  sendSettings(); pushState()
+}
+const SETTINGS_ACTIONS = {
+  'default-browser': () => runCommand('default-browser'),
+  'check-updates': () => checkForUpdates(true),
+  'profile-add': () => { win.focus(); prompt('New profile name', '', (n) => { if (n) { S.profiles.push({ id: uid('p'), name: n, favorites: [] }); store.save(); sendSettings() } }) },
+  'profile-rename': (id) => { const p = profile(id); if (!p) return; win.focus(); prompt('Rename profile', p.name, (n) => { if (n) { p.name = n; store.save(); sendSettings(); pushState() } }) },
+  'profile-delete': async (id) => {
+    if (id === 'default' || S.spaces.some(s => s.profileId === id)) return dialog.showMessageBox(settingsWin, { message: 'Move this profile’s spaces to another profile first.' })
+    const { response } = await dialog.showMessageBox(settingsWin, { type: 'warning', buttons: ['Delete', 'Cancel'], defaultId: 1, cancelId: 1, message: 'Delete this profile and all its data (cookies, logins, history)?' })
+    if (response !== 0) return
+    await getSession(id).clearStorageData()
+    S.profiles = S.profiles.filter(p => p.id !== id); store.save(); sendSettings()
+  },
+  passwords: () => { win.focus(); showPasswords() },
+  'pw-import': () => importPasswords(),
+  'clear-data': () => clearBrowsingData().then(sendSettings),
+  'perm-reset': (origin) => { delete S.permissions[origin]; store.save(); sendSettings() },
+  'reset-perms': () => { S.permissions = {}; store.save(); sendSettings() },
+  copy: (text) => { if (typeof text === 'string') { clipboard.writeText(text); toast('Copied') } },
+  sync: () => { win.focus(); S.sync.enabled ? disableSync() : setupSync(); setTimeout(sendSettings, 500) },
+  extensions: () => { win.focus(); manageExtensions() },
+  webstore: () => { win.focus(); runCommand('ext-store') },
+  'export-data': () => exportData(),
+  'claude-key': () => promptClaudeKey(),
+  'claude-open': () => { win.focus(); toggleChat(true) }
+}
+Object.assign(LATE_ACTIONS, {
+  'settings-set': (k, v) => setSetting(k, v),
+  'settings-action': (name, ...a) => { if (Object.hasOwn(SETTINGS_ACTIONS, name)) SETTINGS_ACTIONS[name](...a) },
+  'settings-ready': () => sendSettings()
+})
+
+async function exportData () {
+  const r = await dialog.showSaveDialog(win, { title: 'Export Drift data', defaultPath: 'Drift Export.json' })
+  if (r.canceled || !r.filePath) return
+  const tabsOf = (ids) => ids.map(id => S.tabs[id]).filter(Boolean).map(t => ({ title: t.customTitle || t.title, url: t.pinnedUrl || t.url }))
+  const data = {
+    exportedAt: new Date().toISOString(),
+    profiles: S.profiles.map(p => ({ name: p.name, favorites: tabsOf(p.favorites) })),
+    spaces: S.spaces.map(s => ({ name: s.name, color: s.color, profile: profile(s.profileId)?.name, pinned: tabsOf(s.pinned), today: tabsOf(s.today) })),
+    archive: S.archive, history: S.history, boosts: S.boosts, settings: S.settings
+  }
+  fs.writeFileSync(r.filePath, JSON.stringify(data, null, 2)); toast('Data exported (passwords not included)')
+}
+
+// ---------------------------------------------------------------- icon, hotkeys, quit
+function applyIcon () {
+  const f = path.join(UI_DIR, 'icons', (S.settings.icon || 'aurora') + '.png')
+  if (!fs.existsSync(f)) return
+  if (isMac && app.dock) app.dock.setIcon(nativeImage.createFromPath(f))
+  else win?.setIcon(nativeImage.createFromPath(f))
+}
+function registerHotkeys () {
+  globalShortcut.unregisterAll()
+  if (S.settings.miniHotkey && !PRIVATE) { try { globalShortcut.register('Alt+CommandOrControl+N', () => openMini()) } catch {} }
+}
+let quitArmed = 0
+function requestQuit () {
+  if (!S.settings.warnBeforeQuit || Date.now() - quitArmed < 2500) return app.quit()
+  quitArmed = Date.now(); toast('Press ⌘Q again to quit')
+}
+
+// ---------------------------------------------------------------- MCP (Claude & other MCP clients)
+let mcp = null
+const MCP_TOOLS = [
+  { name: 'list_tabs', description: 'List open tabs in every space (id, title, url, space, section, active).', inputSchema: { type: 'object', properties: {} } },
+  { name: 'open_url', description: 'Open a URL (or a search query) in a new tab and switch to it.', inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'URL or search terms' } }, required: ['url'] } },
+  { name: 'switch_tab', description: 'Switch to a tab by id.', inputSchema: { type: 'object', properties: { tab_id: { type: 'string' } }, required: ['tab_id'] } },
+  { name: 'close_tab', description: 'Close a tab by id (it goes to the archive).', inputSchema: { type: 'object', properties: { tab_id: { type: 'string' } }, required: ['tab_id'] } },
+  { name: 'get_page_text', description: 'Read the visible text, title and URL of a tab (the active tab if no id). Requires “Allow reading page content”.', inputSchema: { type: 'object', properties: { tab_id: { type: 'string' }, max_chars: { type: 'number' } } } },
+  { name: 'search_history', description: 'Search browsing history by title or URL.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'number' } }, required: ['query'] } },
+  { name: 'list_spaces', description: 'List spaces with their profile and colour.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'switch_space', description: 'Switch to a space by id or name.', inputSchema: { type: 'object', properties: { space: { type: 'string' } }, required: ['space'] } },
+  { name: 'search_archive', description: 'Search archived (auto-closed) tabs.', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+  { name: 'inspect_site', description: 'Security report for a tab: certificate, security headers grade, cookies, tech stack.', inputSchema: { type: 'object', properties: { tab_id: { type: 'string' } } } }
+]
+const mcpMatch = (q, ...f) => f.some(x => (x || '').toLowerCase().includes(String(q || '').toLowerCase()))
+async function mcpCall (name, a) {
+  const tabInfo = (id, sp, section) => ({ id, title: tab(id).customTitle || tab(id).title, url: tab(id).url, space: sp, section, active: id === activeTabId() })
+  switch (name) {
+    case 'list_tabs': {
+      const out = []
+      for (const sp of S.spaces) { for (const id of sp.pinned) out.push(tabInfo(id, sp.name, 'pinned')); for (const id of sp.today) out.push(tabInfo(id, sp.name, 'today')) }
+      for (const p of S.profiles) for (const id of p.favorites) out.push(tabInfo(id, `favorites (${p.name})`, 'favorite'))
+      return out
+    }
+    case 'open_url': { const u = normalizeInput(String(a.url || '')); if (!u || !isSafeWebUrl(u)) throw new Error('Invalid URL'); const id = newTab(u); return { tab_id: id, url: u } }
+    case 'switch_tab': if (!tab(a.tab_id)) throw new Error('No such tab'); activateTab(a.tab_id); return 'ok'
+    case 'close_tab': if (!tab(a.tab_id)) throw new Error('No such tab'); closeTab(a.tab_id); return 'ok'
+    case 'get_page_text': {
+      if (!S.settings.mcpReadPages) throw new Error('Reading page content is turned off in Drift → Settings → Integrations.')
+      const id = a.tab_id || activeTabId(); if (!tab(id)) throw new Error('No such tab')
+      const v = ensureView(id)
+      if (v.webContents.isLoading()) await new Promise(r => { v.webContents.once('did-stop-loading', r); setTimeout(r, 15000) })
+      const max = Math.min(Number(a.max_chars) || 40000, 200000)
+      const text = await v.webContents.executeJavaScriptInIsolatedWorld(999, [{ code: 'document.body ? document.body.innerText : ""' }])
+      return { title: v.webContents.getTitle(), url: v.webContents.getURL(), text: String(text).slice(0, max) }
+    }
+    case 'search_history': return S.history.filter(h => mcpMatch(a.query, h.title, h.url)).slice(0, Math.min(a.limit || 25, 200)).map(h => ({ title: h.title, url: h.url, visited: new Date(h.t).toISOString() }))
+    case 'list_spaces': return S.spaces.map(s => ({ id: s.id, name: s.name, color: s.color, profile: profile(s.profileId)?.name, active: s.id === S.activeSpaceId }))
+    case 'switch_space': { const sp = S.spaces.find(s => s.id === a.space || s.name.toLowerCase() === String(a.space).toLowerCase()); if (!sp) throw new Error('No such space'); switchSpace(sp.id); return 'ok' }
+    case 'search_archive': return S.archive.filter(x => mcpMatch(a.query, x.title, x.url)).slice(0, 50).map(x => ({ title: x.title, url: x.url, archived: new Date(x.archivedAt).toISOString() }))
+    case 'inspect_site': {
+      const id = a.tab_id || activeTabId(); const v = views.get(id); if (!v) throw new Error('Tab is not loaded')
+      return inspector.report({ wc: v.webContents, url: v.webContents.getURL(), ses: v.webContents.session, blocked: live.get(id)?.blocked || 0, permissions: S.permissions[originOf(v.webContents.getURL())] })
+    }
+  }
+  throw new Error('Unknown tool ' + name)
+}
+function setupMcp () {
+  if (mcp) { mcp.stop(); mcp = null }
+  if (S.settings.mcpEnabled && !PRIVATE) mcp = startMcp({ configFile: mcpConfigFile(), tools: () => MCP_TOOLS, onCall: mcpCall })
 }
 
 function runCommand (id) { COMMANDS.find(c => c.id === id)?.run() }
@@ -1050,7 +1585,7 @@ function pushState () {
   const t = (id) => {
     const x = tab(id); if (!x) return null
     const l = live.get(id)
-    return { id, title: x.title, url: x.url, favicon: iconFor(x), loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted }
+    return { id, title: x.customTitle || x.title, url: x.url, favicon: iconFor(x), loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted }
   }
   const act = sp.activeTabId; const l = live.get(act)
   win.webContents.send('state', {
@@ -1063,6 +1598,8 @@ function pushState () {
     split: sp.split,
     sidebarVisible: S.sidebarVisible,
     sidebarPeek,
+    chatOpen,
+    tidyTabs: S.settings.tidyTabs,
     sidebarWidth: S.settings.sidebarWidth,
     nav: { canBack: l?.canBack, canFwd: l?.canFwd, loading: l?.loading, url: tab(act)?.url || '', blocked: l?.blocked || 0 },
     settings: { blocker: S.settings.blocker, httpsOnly: S.settings.httpsOnly },
@@ -1078,7 +1615,7 @@ function pushState () {
 function toast (msg) { win?.webContents.send('toast', msg) }
 
 // ---------------------------------------------------------------- IPC (only from our own UI views)
-const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents
+const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents)
 const ACTIONS = {
   ready: () => { pushState(); layout() },
   activate: (id) => activateTab(id),
@@ -1103,11 +1640,25 @@ const ACTIONS = {
   'show-archive': () => openOverlay({ mode: 'archive', query: '' }),
   // overlay → main
   'overlay-close': closeOverlay,
+  'tidy-tabs': tidyTabs,
+  rename: (id) => { const t = tab(id); if (t) prompt('Rename tab', t.customTitle || t.title, (v) => { if (v != null) { if (v) t.customTitle = v; else delete t.customTitle; store.save(); pushState() } }) },
+  library: () => openLibrary(),
+  inspect: () => openInspector(),
+  settings: (page) => openSettings(page),
+  'peek-open-tab': () => { const u = peekView?.webContents.getURL(); closeOverlay(); if (u) newTab(u) },
+  'peek-split': () => { const u = peekView?.webContents.getURL(); closeOverlay(); if (u) openSplit(u) },
+  instant: (text) => { closeOverlay(); for (const q of String(text).split(',').map(x => x.trim()).filter(Boolean).slice(0, 6)) newTab('https://duckduckgo.com/?q=' + encodeURIComponent('\\ ' + q)) },
   'palette-submit': (r) => {
     const mode = overlayOpen?.mode
     closeOverlay()
     if (!r) return
     if (r.type === 'command') return runCommand(r.id)
+    if (r.type === 'claude') {
+      const wasOpen = chatOpen; toggleChat(true)
+      const askIt = () => chatView.webContents.send('chat', 'ask', String(r.text || ''))
+      if (!wasOpen && chatView.webContents.isLoading()) chatView.webContents.once('did-finish-load', () => setTimeout(askIt, 200)); else askIt()
+      return
+    }
     if (r.type === 'archive') return restoreArchived(r.i)
     if (r.type === 'tab' && mode !== 'split') return activateTab(r.id)
     const url = r.type === 'tab' ? r.id : (r.url || normalizeInput(r.text || ''))
@@ -1122,9 +1673,12 @@ const ACTIONS = {
   'prompt-result': (key, value) => { closeOverlay(); const cb = pending[key]; delete pending[key]; if (cb && value != null) cb(value) },
   find: (text, opts) => { const wc = views.get(activeTabId())?.webContents; if (!wc) return; if (!text) wc.stopFindInPage('clearSelection'); else wc.findInPage(text, opts) }
 }
+Object.assign(ACTIONS, LATE_ACTIONS)
+let uiSender = null // webContents that sent the IPC action being handled
 ipcMain.on('ui', (e, action, ...args) => {
   if (!isOurUI(e) || !Object.hasOwn(ACTIONS, action)) return
-  try { ACTIONS[action](...args) } catch (err) { console.error(action, err) }
+  uiSender = e.sender
+  try { ACTIONS[action](...args) } catch (err) { console.error(action, err) } finally { uiSender = null }
 })
 ipcMain.handle('suggest', async (e, q) => {
   if (!isOurUI(e) || !S.settings.suggestions || typeof q !== 'string' || !q.trim() || q.length > 200) return []
@@ -1148,7 +1702,7 @@ function buildMenu () {
   }))
   const spaceNums = Array.from({ length: 9 }, (_, i) => ({ label: `Space ${i + 1}`, accelerator: `Ctrl+${i + 1}`, visible: false, click: () => S.spaces[i] && switchSpace(S.spaces[i].id) }))
   const tmpl = [
-    ...(isMac ? [{ label: 'Drift', submenu: [{ role: 'about' }, { label: 'Check for Updates…', click: () => checkForUpdates(true) }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] }] : []),
+    ...(isMac ? [{ label: 'Drift', submenu: [{ role: 'about' }, { label: 'Check for Updates…', click: () => checkForUpdates(true) }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { label: 'Settings…', accelerator: 'Cmd+,', click: () => openSettings() }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { label: 'Quit Drift', accelerator: 'Cmd+Q', click: requestQuit }] }] : []),
     {
       label: 'File',
       submenu: [
@@ -1156,6 +1710,7 @@ function buildMenu () {
         { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: () => commandBar('edit') },
         { label: 'Command Bar', accelerator: 'CmdOrCtrl+K', click: () => commandBar('new'), visible: false },
         { label: 'New Private Window', accelerator: 'CmdOrCtrl+Shift+N', click: openPrivateWindow },
+        { label: 'New Little Window', click: () => openMini() },
         { label: 'New Space…', click: () => runCommand('new-space') },
         { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: reopenClosed },
         { type: 'separator' },
@@ -1171,7 +1726,11 @@ function buildMenu () {
         { label: 'Copy URL', accelerator: 'CmdOrCtrl+Shift+C', click: () => copyUrl() },
         { type: 'separator' },
         { label: 'Passwords…', click: () => showPasswords() },
-        { label: 'Extensions…', click: () => manageExtensions() }]
+        { label: 'Extensions…', click: () => manageExtensions() },
+        { label: 'Site Inspector', accelerator: isMac ? 'Cmd+Shift+I' : 'Ctrl+Shift+U', click: () => openInspector() },
+        { label: 'Ask Claude', accelerator: 'CmdOrCtrl+E', click: () => toggleChat() },
+        { label: 'Boost This Site…', click: () => boostSite() },
+        ...(isMac ? [] : [{ label: 'Settings…', accelerator: 'Ctrl+,', click: () => openSettings() }])]
     },
     {
       label: 'View',
@@ -1261,6 +1820,7 @@ function createWindow () {
   win.on('enter-full-screen', pushState)
   win.on('leave-full-screen', () => { if (htmlFullscreen) navActive(wc => wc.executeJavaScript('document.fullscreenElement && document.exitFullscreen()').catch(() => {})); pushState() })
   win.on('close', () => store.saveNow())
+  win.on('closed', () => { for (const m of miniWindows) m.win.close() })
   win.on('closed', () => { win = null; overlay = null; views.clear(); wcToTab.clear(); live.clear() })
   // restore the active tab
   const sp = space()
@@ -1284,9 +1844,10 @@ function sanitizeState () {
 }
 
 let pendingOpenUrls = []
-app.on('open-url', (e, url) => { e.preventDefault(); if (win && S) newTab(url); else pendingOpenUrls.push(url) })
+const openExternalLink = (url) => (S.settings.miniForExternal ? openMini(url) : newTab(url))
+app.on('open-url', (e, url) => { e.preventDefault(); if (win && S) openExternalLink(url); else pendingOpenUrls.push(url) })
 app.on('second-instance', (_e, argv) => {
-  const url = argv.find(a => /^https?:\/\//.test(a)); if (url && S) newTab(url)
+  const url = argv.find(a => /^https?:\/\//.test(a)); if (url && S) openExternalLink(url)
   if (win) { if (win.isMinimized()) win.restore(); win.focus() }
 })
 
@@ -1317,10 +1878,18 @@ app.whenReady().then(() => {
       S.profiles[0].favorites.push(id)
     }
   }
+  if (!S.settings.restoreSession && !PRIVATE) {
+    for (const sp of S.spaces) { for (const id of sp.today) { archiveEntry(S.tabs[id], sp.id); delete S.tabs[id] } sp.today = []; sp.split = null }
+    sanitizeState()
+  }
+  if (S.settings.blocker) adblock.load(app.getPath('userData'), { strictMode: S.settings.strictBlocking }).then(r => console.log('adblock:', r))
   buildMenu()
   createWindow()
+  applyIcon()
+  registerHotkeys()
+  setupMcp()
   const cli = process.argv.slice(1).filter(a => /^https?:\/\//.test(a))
-  for (const u of [...pendingOpenUrls, ...cli]) newTab(u)
+  for (const u of [...pendingOpenUrls, ...cli]) openExternalLink(u)
   if (!PRIVATE) {
     for (const p of S.profiles) {
       const ses = getSession(p.id)
@@ -1331,14 +1900,16 @@ app.whenReady().then(() => {
   }
   setInterval(autoArchive, 60e3)
   autoArchive()
-  if (!PRIVATE) setTimeout(() => checkForUpdates(false), 10e3)
+  if (!PRIVATE && S.settings.autoUpdate) setTimeout(() => checkForUpdates(false), 10e3)
   setInterval(() => checkForUpdates(false), 4 * HOUR)
   app.on('activate', () => { if (!win) createWindow() })
 })
 
 app.on('window-all-closed', () => { if (!isMac) app.quit() })
 app.on('before-quit', () => { if (!PRIVATE) { store?.saveNow(); runSync(false) } })
-app.on('will-quit', () => { if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll(); mcp?.stop()
+  if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })
