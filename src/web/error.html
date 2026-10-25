@@ -1,20 +1,24 @@
 <!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-n6rDTHQWA9O00jx2hTxP14MfRKFgbzWYUlm2URLXfs0='">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; style-src 'unsafe-inline'; script-src 'sha256-+j419LqvSTNDonOMmY+7MYNo6sRSCABJMoAhqaWHRSE='">
 <title>Can't open this page</title>
 <style>
 body{font:15px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;background:#faf9fc;color:#2a2733}
 @media (prefers-color-scheme:dark){body{background:#1c1b22;color:#e8e6ef}}
 .box{max-width:460px;text-align:center}h1{font-size:22px;margin:0 0 8px}p{opacity:.7;word-break:break-all}
-a.btn{display:inline-block;margin-top:14px;padding:8px 16px;border-radius:8px;background:#7c5cff;color:#fff;text-decoration:none}
+a.btn{display:inline-block;margin:14px 6px 0;padding:8px 16px;border-radius:8px;background:#7c5cff;color:#fff;text-decoration:none}a.btn.ghost{background:none;color:inherit;opacity:.7;text-decoration:underline}body.danger{background:#b3261e;color:#fff}body.danger a.btn.primary{background:#fff;color:#b3261e}body.danger p,body.danger code{opacity:.9}
 code{opacity:.5;font-size:12px}
 </style></head><body><div class="box"><h1 id="h"></h1><p id="p"></p><code id="c"></code><div id="a"></div></div>
 <script>
-const q=new URLSearchParams(location.search),k=q.get('kind'),u=q.get('url')||''
+const q=new URLSearchParams(location.hash.slice(1)),k=q.get('kind'),u=q.get('url')||''
 const set=(id,t)=>document.getElementById(id).textContent=t
+const btn=(text,href,cls)=>{const a=document.createElement('a');a.className='btn'+(cls?' '+cls:'');a.textContent=text;a.href=href;document.getElementById('a').append(a)}
 document.title=u
-if(k==='https'){set('h','This site doesn’t support a secure connection');set('p','HTTPS-Only Mode couldn’t upgrade '+u.replace(/^http:/,'https:')+'. Data you send over HTTP can be seen by others.')
- const a=document.createElement('a');a.className='btn';a.textContent='Continue to HTTP site';a.href=u;document.getElementById('a').append(a)}
-else if(k==='crash'){set('h','This page crashed');set('p',u);const a=document.createElement('a');a.className='btn';a.textContent='Reload';a.href=u;document.getElementById('a').append(a)}
+if(k==='https'){set('h','This site doesn’t support a secure connection');set('p','HTTPS-Only Mode couldn’t upgrade '+u.replace(/^http:/,'https:')+'. Data you send over HTTP can be seen by others.');btn('Continue to HTTP site',u)}
+else if(k==='danger'){document.body.className='danger';const t=q.get('threat');document.title='Dangerous site blocked'
+ set('h',t==='phishing'?'Deceptive site ahead':'This site may harm your computer')
+ set('p',(t==='phishing'?'Attackers on this site may trick you into doing something dangerous, like revealing passwords, phone numbers or card details. ':'This site is known to distribute malware that can steal or damage your information. ')+u)
+ btn('Back to safety','https://back-to-safety.drift.invalid/','primary');btn('Continue anyway (unsafe)',u,'ghost')}
+else if(k==='crash'){set('h','This page crashed');set('p',u);btn('Reload',u)}
 else{set('h','Can’t open this page');set('p',u)}
-set('c',(q.get('desc')||'')+' '+(q.get('code')||''))
+set('c',k==='danger'?'Source: '+(q.get('threat')==='phishing'?'OpenPhish':'abuse.ch URLhaus')+' threat feed':((q.get('desc')||'')+' '+(q.get('code')||'')))
 </script></body></html>

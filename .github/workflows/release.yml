@@ -2,22 +2,56 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
   mac:
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm ci
-      - run: npm run release
+      - name: Security gate (dependency audit)
+        run: npm audit --omit=dev
+      - name: Build DMG + ZIP (Apple Silicon + Intel)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional signing/notarisation (required for silent auto-updates on macOS):
-          CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          MAC_CERT: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$MAC_CERT" ]; then
+            # Developer ID signing + notarisation
+            export CSC_LINK="$MAC_CERT" CSC_KEY_PASSWORD="$MAC_CERT_PASSWORD"
+            npx electron-builder --mac --publish never
+          else
+            # No Apple certificate: ad-hoc sign so the app runs on Apple Silicon
+            unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+            npx electron-builder --mac --publish never -c.mac.identity=- -c.mac.entitlements=build/entitlements.adhoc.plist -c.mac.entitlementsInherit=build/entitlements.adhoc.plist
+          fi
+      - name: Verify app bundles (signature + fuses)
+        run: |
+          ls -la dist
+          for APP in $(find dist -maxdepth 2 -name "Drift.app"); do
+            echo "== $APP"; codesign --verify --deep --strict --verbose=2 "$APP"
+            npx --yes @electron/fuses read --app "$APP"
+          done
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-mac
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.blockmap
+            dist/latest-mac.yml
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml --title "Drift $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md

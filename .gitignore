@@ -1,3 +1,4 @@
 node_modules/
 dist/
 src/preload/ui-main.js
+security-report.csv

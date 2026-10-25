@@ -85,13 +85,17 @@ function createPasswords ({ file, getWin, isPrivate, isTab, toast }) {
   })
 
   // ---- manager actions -------------------------------------------------------------
+  // Wipe the clipboard after a delay — but only if it still holds the password (you may have copied something else)
+  function clearClipboardLater (secret, ms = 30e3) {
+    setTimeout(async () => { try { if ((await clipboard.readText()) === secret) clipboard.clear() } catch {} }, ms)
+  }
   function list () { return db.entries.map(e => ({ id: e.id, origin: e.origin, host: host(e.origin), username: e.username, updatedAt: e.updatedAt })).sort((a, b) => a.host.localeCompare(b.host)) }
   async function copySecret (id) {
     const e = db.entries.find(x => x.id === id); if (!e) return
     if (!(await authenticate(`reveal the password for ${host(e.origin)}`))) return
     const pw = dec(e.password)
-    clipboard.writeText(pw); toast?.('Password copied — clipboard clears in 30 s')
-    setTimeout(() => { if (clipboard.readText() === pw) clipboard.clear() }, 30e3)
+    await clipboard.writeText(pw); toast?.('Password copied — clipboard clears in 30 s')
+    clearClipboardLater(pw)
   }
   function parseCsv (text) {
     const rows = []; let row = []; let f = ''; let q = false
@@ -141,7 +145,7 @@ function createPasswords ({ file, getWin, isPrivate, isTab, toast }) {
     save()
   }
 
-  return { list, remove, copySecret, importCsv, exportCsv, exportForSync, mergeFromSync, authenticate, upsert, canEncrypt, get count () { return db.entries.length } }
+  return { list, remove, copySecret, clearClipboardLater, importCsv, exportCsv, exportForSync, mergeFromSync, authenticate, upsert, canEncrypt, get count () { return db.entries.length } }
 }
 
 module.exports = { createPasswords }

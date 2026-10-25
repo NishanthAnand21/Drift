@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 'use strict'
-// Drift MCP bridge (stdio ⇄ running Drift). Configure your MCP client with:
-//   command: <Drift executable>, env: { ELECTRON_RUN_AS_NODE: "1", DRIFT_MCP_CONFIG: "<userData>/drift-mcp.json" },
-//   args: ["<path to this file>"]
+// Drift MCP bridge (stdio ⇄ running Drift). Runs with Node.js 18+. Configure your MCP client with:
+//   command: "node", args: ["<path to this file>"], env: { DRIFT_MCP_CONFIG: "<userData>/drift-mcp.json" }
 // Settings → Integrations shows the exact snippet.
 const fs = require('fs')
 const http = require('http')

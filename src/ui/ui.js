@@ -191,6 +191,8 @@ function render () {
   $('#blocked').textContent = S.nav.blocked ? String(S.nav.blocked) : ''
   document.body.classList.toggle('tidy', !!S.tidyTabs && S.today.length > 6)
   document.body.classList.toggle('chat', !!S.chatOpen)
+  document.body.classList.toggle('dim-unloaded', S.dimUnloaded !== false)
+  document.body.classList.toggle('no-pin-reset', S.pinnedResetButton === false)
 
   $('#favorites').replaceChildren(...S.favorites.map(favTile))
   $('#space-icon').textContent = sp.icon || ''
@@ -278,7 +280,8 @@ api.on('layout', ({ panes, dir }) => {
   })
 })
 
-api.on('state', (s) => { S = s; render() })
+let lastStateJson = ''
+api.on('state', (s) => { const j = JSON.stringify(s); if (j === lastStateJson) return; lastStateJson = j; S = s; render() })
 api.on('toast', (msg) => {
   const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg
   $('#toasts').append(t); setTimeout(() => t.remove(), 2600)

@@ -60,6 +60,7 @@ function render () {
     nodes.push(row(r, i))
   })
   resEl.replaceChildren(...nodes)
+  warm()
 }
 function row (r, i) {
   {
@@ -73,10 +74,12 @@ function row (r, i) {
     return el
   }
 }
-function mark () { const rows = [...resEl.querySelectorAll('.r')]; rows.forEach((c, i) => c.classList.toggle('sel', i === sel)); rows[sel]?.scrollIntoView({ block: 'nearest' }) }
+function mark () { warm(); const rows = [...resEl.querySelectorAll('.r')]; rows.forEach((c, i) => c.classList.toggle('sel', i === sel)); rows[sel]?.scrollIntoView({ block: 'nearest' }) }
+let warmTimer = null
+function warm () { clearTimeout(warmTimer); warmTimer = setTimeout(() => { const r = results[sel]; const u = r?.url || (r?.type === 'go' && /^https:\/\//.test(r.text || '') ? r.text : null); if (u) api.send('preconnect', u) }, 120) }
 
 function submit (shift) {
-  if (O.mode === 'find') return api.send('find', q.value, { forward: !shift, findNext: true })
+  if (O.mode === 'find') return api.send('find', q.value, shift ? 'prev' : 'next')
   if (O.mode === 'prompt') return api.send('prompt-result', O.key, q.value.trim())
   const r = results[sel]
   if (O.mode === 'pick') return r && api.send('prompt-result', O.key, r.value)
@@ -89,7 +92,7 @@ function close () { if (O?.mode === 'prompt' || O?.mode === 'pick') api.send('pr
 
 q.addEventListener('input', () => {
   sel = 0
-  if (O.mode === 'find') { api.send('find', q.value, { findNext: false }); return }
+  if (O.mode === 'find') { api.send('find', q.value, 'new'); return }
   render()
   const text = q.value.trim()
   if ((O.mode === 'new' || O.mode === 'edit' || O.mode === 'split') && O.snapshot.suggestions && text && !looksUrl(text)) {
@@ -116,6 +119,9 @@ api.on('open', (o) => {
   document.body.className = ['find', 'peek', 'report'].includes(o.mode) ? o.mode : ''
   if (o.mode === 'peek') { document.getElementById('peekurl').textContent = o.query; document.getElementById('peektitle').textContent = '' }
   if (o.mode === 'report') renderReport(o.report)
+  const tm = o.snapshot.themeMode
+  document.documentElement.dataset.mode = tm === 'dark' || (tm !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'
+  if (o.mode === 'find') for (const k of FIND_OPTS) document.getElementById('o-' + k).checked = !!o.snapshot.find?.[k]
   document.getElementById('title').textContent = o.title || TITLES[o.mode] || ''
   document.getElementById('glyph').textContent = o.mode === 'find' ? '⌕' : o.mode === 'prompt' ? '✎' : o.mode === 'split' ? '◫' : '⌕'
   document.getElementById('count').textContent = ''
@@ -124,7 +130,17 @@ api.on('open', (o) => {
   q.value = o.query || ''
   render(); q.focus(); q.select()
 })
-api.on('find-result', (r) => { if (r.finalUpdate) document.getElementById('count').textContent = r.matches ? `${r.activeMatchOrdinal}/${r.matches}` : 'No matches' })
+api.on('find-result', (r) => {
+  if (!r.finalUpdate) return
+  document.getElementById('count').textContent = !q.value ? '' : r.matches ? `${r.activeMatchOrdinal} of ${r.matches} match${r.matches === 1 ? '' : 'es'}` : 'No matches'
+})
+const FIND_OPTS = ['highlightAll', 'matchCase', 'diacritics', 'wholeWords']
+for (const k of FIND_OPTS) {
+  document.getElementById('o-' + k).onchange = (e) => { api.send('find', q.value, 'new', { [k]: e.target.checked }); q.focus() }
+}
+document.getElementById('f-prev').onclick = () => { api.send('find', q.value, 'prev'); q.focus() }
+document.getElementById('f-next').onclick = () => { api.send('find', q.value, 'next'); q.focus() }
+document.getElementById('f-close').onclick = () => api.send('overlay-close')
 
 api.on('peek-title', (t) => { document.getElementById('peektitle').textContent = t })
 document.getElementById('peek-open').onclick = () => api.send('peek-open-tab')

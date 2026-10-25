@@ -1,7 +1,7 @@
 'use strict'
 const {
   app, BrowserWindow, WebContentsView, Menu, ipcMain, session, dialog, shell,
-  clipboard, net, nativeTheme, desktopCapturer, globalShortcut, nativeImage
+  clipboard, ClipboardItem, protocol, net, nativeTheme, desktopCapturer, globalShortcut, nativeImage, webContents
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -14,14 +14,46 @@ const sync = require('./sync')
 const adblock = require('./adblock')
 const inspector = require('./inspector')
 const { startMcp } = require('./mcp')
+const finder = require('./find')
+const safebrowsing = require('./safebrowsing')
+const visuals = require('./visuals')
 const { createClaudeChat, MODELS: CLAUDE_MODELS } = require('./claude')
 
 const isMac = process.platform === 'darwin'
-const UI_DIR = path.join(__dirname, '..', 'ui')
+const UI_DIR = path.resolve(__dirname, '..', 'ui')
+// Drift's own UI is served from a private, secure scheme (drift-ui://app/…) instead of file://,
+// so the GrantFileProtocolExtraPrivileges fuse can stay off. Only Drift's UI session can load it.
+protocol.registerSchemesAsPrivileged([{ scheme: 'drift-ui', privileges: { standard: true, secure: true } }])
+const UI_MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml' }
+function uiURL (file, query) {
+  const u = new URL('drift-ui://app/' + file)
+  for (const [k, v] of Object.entries(query || {})) u.searchParams.set(k, String(v))
+  return u.toString()
+}
+function serveUI () {
+  protocol.handle('drift-ui', async (req) => {
+    let u; try { u = new URL(req.url) } catch { return new Response('Bad request', { status: 400 }) }
+    const file = path.resolve(UI_DIR, decodeURIComponent(u.pathname).replace(/^\/+/, ''))
+    const type = UI_MIME[path.extname(file)]
+    if (u.host !== 'app' || !file.startsWith(UI_DIR + path.sep) || !type) return new Response('Not found', { status: 404 })
+    try {
+      return new Response(await fs.promises.readFile(file), { headers: { 'content-type': type, 'x-content-type-options': 'nosniff', 'cache-control': 'no-cache' } })
+    } catch { return new Response('Not found', { status: 404 }) }
+  })
+}
 const PRELOAD = path.join(__dirname, '..', 'preload', 'ui.js')
 const MAIN_PRELOAD = path.join(__dirname, '..', 'preload', 'ui-main.js')
 const WEB_PRELOAD = path.join(__dirname, '..', 'preload', 'web.js')
 const ERROR_PAGE = path.join(__dirname, '..', 'web', 'error.html')
+let errorHtml = null
+// Error / warning pages open inside website tabs as self-contained data: pages (strict CSP inside),
+// with their parameters in the URL fragment.
+function showErrorPage (wc, params) {
+  if (!wc || wc.isDestroyed()) return
+  errorHtml = errorHtml || fs.readFileSync(ERROR_PAGE)
+  wc.loadURL('data:text/html;charset=utf-8;base64,' + errorHtml.toString('base64') + '#' + new URLSearchParams(params).toString()).catch(() => {})
+}
+const isInternalPage = (u) => typeof u === 'string' && u.startsWith('data:text/html')
 
 // Sandbox every renderer (skipped only when running as root, e.g. Linux CI containers)
 if (process.getuid?.() !== 0) app.enableSandbox()
@@ -101,6 +133,13 @@ const DEFAULTS = {
     pipOnLeave: true,
     pipOnAppSwitch: true,
     favPreviews: true,
+    dimUnloaded: true,
+    safeBrowsing: true,
+    pinnedResetButton: true,
+    findHighlightAll: true,
+    findMatchCase: false,
+    findDiacritics: false,
+    findWholeWords: false,
     boostsEnabled: true,
     icon: 'aurora',
     mcpEnabled: false,
@@ -139,6 +178,8 @@ const activeDownloads = new Map() // id -> DownloadItem
 const downloadThumbs = new Map() // id -> data URL (Quick Look thumbnail or file icon)
 const httpFallbackHosts = new Set()
 const upgradedHosts = new Set()
+const safeBypass = new Set() // hosts you chose to visit despite a warning (this session only)
+const dangerPending = new Map() // webContentsId -> warning to show once the blocked load fails
 const configuredSessions = new Set()
 const pending = {} // prompt/pick callbacks
 
@@ -247,7 +288,19 @@ function setupSession (ses, { extensions = true } = {}) {
   ses.webRequest.onBeforeRequest((details, cb) => {
     let u
     try { u = new URL(details.url) } catch { return cb({}) }
+    const threat = S.settings.safeBrowsing && !safeBypass.has(u.hostname) ? safebrowsing.check(details.url) : null
     if (details.resourceType === 'mainFrame') {
+      if (threat) {
+        // Tabs show the warning from their did-fail-load (no race with the generic error page);
+        // other views (Peek, Little Window, Claude panel) get it directly.
+        const params = { kind: 'danger', url: details.url, threat }
+        if (wcToTab.has(details.webContentsId)) {
+          const id = details.webContentsId; dangerPending.set(id, params)
+          setTimeout(() => { if (dangerPending.get(id) === params) { dangerPending.delete(id); showErrorPage(webContents.fromId(id), params) } }, 1500)
+        }
+        else { const wc = webContents.fromId(details.webContentsId); setImmediate(() => showErrorPage(wc, params)) }
+        return cb({ cancel: true })
+      }
       if (S.settings.httpsOnly && u.protocol === 'http:' && !httpFallbackHosts.has(u.host) &&
           !/^(localhost|127\.|10\.|192\.168\.|\[::1\])/.test(u.hostname) && !u.hostname.endsWith('.local')) {
         upgradedHosts.add(u.host)
@@ -256,6 +309,7 @@ function setupSession (ses, { extensions = true } = {}) {
       }
       return cb({})
     }
+    if (threat) return cb({ cancel: true }) // malware / phishing resources inside other pages
     if (S.settings.blocker && !siteFlag(wcToTab.get(details.webContentsId), 'noBlock')) {
       const tabId = wcToTab.get(details.webContentsId)
       const verdict = adblock.match(details, tab(tabId)?.url) || (isBlockedHost(u.hostname) ? { cancel: true } : null)
@@ -464,8 +518,9 @@ function ensureView (tabId) {
   live.set(tabId, { loading: false, canBack: false, canFwd: false, blocked: 0, audible: false, muted: false, zoom: 0 })
   wireWebContents(tabId, wc)
   extFor(tabId)?.addTab(wc, win)
-  const url = t.url && isSafeWebUrl(t.url) ? t.url : 'about:blank'
-  wc.loadURL(url).catch(() => {})
+  const vis = visualFile(t.url)
+  if (vis) showVisual(wc, vis)
+  else wc.loadURL(t.url && isSafeWebUrl(t.url) ? t.url : 'about:blank').catch(() => {})
   return view
 }
 
@@ -499,7 +554,7 @@ function wireWebContents (tabId, wc) {
   wc.once('destroyed', () => inspector.forget(wc.id))
   wc.on('did-stop-loading', () => { if (st()) st().loading = false; updateNav(); setTimeout(() => snapshotTab(tabId), 1200) })
   wc.on('did-navigate', (_e, url) => {
-    if (url.startsWith('file:')) return updateNav() // our error page
+    if (isInternalPage(url)) return updateNav() // our error / warning / visual page
     if (t()) { t().url = url; store.save() }
     if (st()) st().blocked = 0
     addHistory(url, wc.getTitle())
@@ -510,7 +565,7 @@ function wireWebContents (tabId, wc) {
     t().url = url; store.save(); addHistory(url, wc.getTitle()); updateNav()
   })
   wc.on('page-title-updated', (_e, title) => {
-    if (!t() || wc.getURL().startsWith('file:')) return
+    if (!t() || (isInternalPage(wc.getURL()) && !visualFile(t().url))) return
     t().title = title; store.save()
     const h = S.history[0]; if (h && h.url === wc.getURL()) h.title = title
     pushStateSoon()
@@ -528,15 +583,16 @@ function wireWebContents (tabId, wc) {
     }
   })
   wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
+    if (isMain && dangerPending.has(wc.id)) { const p = dangerPending.get(wc.id); dangerPending.delete(wc.id); return showErrorPage(wc, p) }
     if (!isMain || code === -3) return // aborted
     try {
       const u = new URL(url)
       // HTTPS-Only fallback: if an auto-upgraded site has no HTTPS, offer HTTP
       if (u.protocol === 'https:' && S.settings.httpsOnly && upgradedHosts.has(u.host)) {
-        return wc.loadFile(ERROR_PAGE, { query: { kind: 'https', url: url.replace(/^https:/, 'http:'), code: String(code), desc } })
+        return showErrorPage(wc, { kind: 'https', url: url.replace(/^https:/, 'http:'), code: String(code), desc })
       }
     } catch {}
-    wc.loadFile(ERROR_PAGE, { query: { kind: 'error', url, code: String(code), desc } })
+    showErrorPage(wc, { kind: 'error', url, code: String(code), desc })
   })
   wc.on('will-navigate', (e) => {
     guardNavigation(e, e.url, wc)
@@ -557,7 +613,7 @@ function wireWebContents (tabId, wc) {
   wc.on('found-in-page', (_e, r) => overlay?.webContents.send('find-result', r))
   wc.on('context-menu', (_e, p) => pageContextMenu(tabId, wc, p))
   wc.on('render-process-gone', (_e, d) => {
-    if (d.reason !== 'clean-exit') wc.loadFile(ERROR_PAGE, { query: { kind: 'crash', url: t()?.url || '', code: d.reason, desc: '' } })
+    if (d.reason !== 'clean-exit') showErrorPage(wc, { kind: 'crash', url: t()?.url || '', code: d.reason, desc: '' })
   })
   wc.on('before-input-event', (e, input) => {
     // Error-page "Continue over HTTP" button signals via title change; nothing else needed here.
@@ -587,18 +643,36 @@ function wireWebContents (tabId, wc) {
 }
 
 function guardNavigation (e, url, wc) {
+  // Dangerous-site warning page: “Back to safety” / “Continue anyway”
+  const cur = wc.getURL()
+  if (isInternalPage(cur) && cur.includes('kind=danger')) {
+    if (url.startsWith('https://back-to-safety.drift.invalid')) {
+      e.preventDefault()
+      // Step back to the last *safe* page: the blocked address itself is also in history (as a failed load)
+      const nh = wc.navigationHistory
+      const danger = new URLSearchParams(cur.split('#')[1] || '').get('url')
+      let target = -1
+      for (let i = nh.getActiveIndex() - 1; i >= 0; i--) {
+        const u = nh.getEntryAtIndex(i)?.url
+        if (u && /^https?:/.test(u) && u !== danger && !safebrowsing.check(u)) { target = i; break }
+      }
+      if (target >= 0) nh.goToIndex(target); else wc.loadURL('about:blank').catch(() => {})
+      return
+    }
+    if (/^https?:/.test(url)) { try { safeBypass.add(new URL(url).hostname) } catch {} return }
+  }
   if (url.startsWith('chrome-extension:')) return
   // "Continue to HTTP site" from the HTTPS-Only error page
-  if (url.startsWith('http:') && wc.getURL().startsWith('file:') && wc.getURL().includes('kind=https')) {
+  if (url.startsWith('http:') && isInternalPage(wc.getURL()) && wc.getURL().includes('kind=https')) {
     try { httpFallbackHosts.add(new URL(url).host) } catch {}
     return
   }
   if (/^(https?|about|data):/i.test(url)) return
-  if (url.startsWith('file:') && url.includes('/web/error.html')) return
   e.preventDefault()
   let scheme = ''
   try { scheme = new URL(url).protocol } catch { return }
-  if (['javascript:', 'file:', 'chrome:', 'devtools:'].includes(scheme)) return
+  // never hand these to the OS: script/file access, and network shares that macOS would mount
+  if (['javascript:', 'file:', 'chrome:', 'devtools:', 'smb:', 'afp:', 'nfs:', 'cifs:', 'vnc:', 'ssh:', 'x-apple.systempreferences:'].includes(scheme)) return
   dialog.showMessageBox(win, {
     type: 'question', buttons: ['Open', 'Cancel'], defaultId: 1, cancelId: 1,
     message: `Open “${scheme}” link in another application?`, detail: url.slice(0, 300)
@@ -892,11 +966,17 @@ function createSpace (name, { newProfile = false } = {}) {
   switchSpace(id)
 }
 
+// The space's most recently used tab (loaded or not) — what you expect to see when you return to it
+function mostRecentTab (sp) {
+  const ids = [...sp.today, ...pinnedTabs(sp), ...(profile(sp.profileId)?.favorites || [])].filter(id => tab(id))
+  return ids.sort((x, y) => (tab(y).lastActiveAt || 0) - (tab(x).lastActiveAt || 0))[0] || null
+}
 function switchSpace (id) {
   const sp = space(id); if (!sp) return
   S.activeSpaceId = id
-  if (sp.activeTabId && tab(sp.activeTabId)) activateTab(sp.activeTabId)
-  else { layout(); pushState(); win.webContents.focus() }
+  const target = sp.activeTabId && tab(sp.activeTabId) ? sp.activeTabId : mostRecentTab(sp)
+  if (target) activateTab(target)
+  else { sp.activeTabId = null; layout(); pushState(); win.webContents.focus() }
   store.save()
 }
 
@@ -990,7 +1070,7 @@ function startSplitDrag (index) {
     dragShield.setBackgroundColor('#00000000')
     dragShield.webContents.on('will-navigate', e => e.preventDefault())
   }
-  dragShield.webContents.loadFile(path.join(UI_DIR, 'drag-shield.html'), { query: { dir: sp.split.dir } })
+  dragShield.webContents.loadURL(uiURL('drag-shield.html', { dir: sp.split.dir }))
   const [w, h] = win.getContentSize()
   win.contentView.addChildView(dragShield); dragShield.setBounds({ x: 0, y: 0, width: w, height: h })
 }
@@ -1013,7 +1093,11 @@ function endSplitDrag () {
 
 function overlayBounds () {
   const [w, h] = win.getContentSize()
-  if (overlayOpen?.mode === 'find') return { x: w - 380, y: 14, width: 360, height: 64 }
+  if (overlayOpen?.mode === 'find') {
+    const a = lastLayout?.area || { x: 8, y: 8, width: w - 16 }
+    const fw = Math.min(760, a.width - 40)
+    return { x: Math.round(a.x + (a.width - fw) / 2), y: a.y + 14, width: fw, height: 108 }
+  }
   if (peekView && overlayOpen?.mode === 'peek') { const pb = peekBounds(); peekView.setBounds(pb) }
   return { x: 0, y: 0, width: w, height: h }
 }
@@ -1024,7 +1108,7 @@ function ensureOverlay () {
     webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false }
   })
   overlay.setBackgroundColor('#00000000')
-  overlay.webContents.loadFile(path.join(UI_DIR, 'palette.html'))
+  overlay.webContents.loadURL(uiURL('palette.html'))
   overlay.webContents.on('will-navigate', e => e.preventDefault())
   overlay.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   return overlay
@@ -1047,7 +1131,7 @@ function closeOverlay () {
   overlayOpen = null
   try { win.contentView.removeChildView(overlay) } catch {}
   const wc = views.get(activeTabId())?.webContents
-  if (wasFind && wc) wc.stopFindInPage('clearSelection')
+  if (wasFind && wc) { wc.stopFindInPage('clearSelection'); finder.clear(wc) }
   if (wc) wc.focus(); else win.webContents.focus()
 }
 
@@ -1081,6 +1165,8 @@ function paletteSnapshot () {
     color: sp.color,
     engine: ENGINES[S.settings.searchEngine].name,
     ai: S.settings.aiInCommandBar ? S.settings.aiProvider : null,
+    themeMode: space().theme.mode,
+    find: { highlightAll: S.settings.findHighlightAll, matchCase: S.settings.findMatchCase, diacritics: S.settings.findDiacritics, wholeWords: S.settings.findWholeWords },
     instant: S.settings.instantLinks,
     suggestions: S.settings.suggestions
   }
@@ -1105,6 +1191,9 @@ const COMMANDS = [
   { id: 'find', title: 'Find in Page', keys: '⌘F', run: () => setTimeout(findInPage) },
   { id: 'sidebar', title: 'Toggle Sidebar', keys: '⌘S', run: toggleSidebar },
   { id: 'new-folder', title: 'New Folder (pinned tabs)', run: () => newFolder() },
+  { id: 'task-manager', title: 'Task Manager — memory used by each tab', run: () => setTimeout(taskManager) },
+  { id: 'visual', title: 'Create Visual from This Page… (slide deck, poster, infographic, dashboard)', run: () => setTimeout(chooseVisual) },
+  { id: 'visual-pdf', title: 'Export Visual as PDF', run: () => exportVisualPdf() },
   { id: 'downloads-panel', title: 'Show Downloads', run: () => { downloadsOpen = true; pushState(); LATE_ACTIONS['dl-thumbs']() } },
   { id: 'new-space', title: 'New Space…', run: () => setTimeout(() => prompt('Name your new space', '', (n) => n && createSpace(n))) },
   { id: 'new-profile-space', title: 'New Space with New Profile…', run: () => setTimeout(() => prompt('Name the new profile & space', '', (n) => n && createSpace(n, { newProfile: true }))) },
@@ -1248,7 +1337,7 @@ function runSync (manual = false) {
       sanitizeState()
       // tabs removed by another device: unload their pages too
       for (const id of [...views.keys()]) if (!S.tabs[id]) destroyView(id)
-      for (const sp of S.spaces) if (sp.activeTabId && !S.tabs[sp.activeTabId]) sp.activeTabId = pickNeighbor(sp, null)
+      for (const sp of S.spaces) if (sp.activeTabId && !S.tabs[sp.activeTabId]) sp.activeTabId = pickNeighbor(sp, null) || mostRecentTab(sp)
       layout(); pushState()
     }
     if (r.errors.length) toast('Sync problem: ' + r.errors[0])
@@ -1303,7 +1392,7 @@ function ensurePreviewView () {
   previewView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
   previewView.setBackgroundColor('#00000000')
   previewView.setBorderRadius?.(14)
-  previewView.webContents.loadFile(path.join(UI_DIR, 'fav-preview.html'))
+  previewView.webContents.loadURL(uiURL('fav-preview.html'))
   previewView.webContents.on('will-navigate', e => e.preventDefault())
   previewView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   return previewView
@@ -1318,7 +1407,10 @@ async function snapshotTab (tabId) {
   if (!v || !loc || loc.type !== 'favorite' || v.webContents.isDestroyed() || !win.contentView.children.includes(v)) return
   try {
     const img = await v.webContents.capturePage()
-    if (!img.isEmpty()) snapshots.set(tabId, img.resize({ width: PREVIEW_W * 2 }).toDataURL())
+    if (!img.isEmpty()) {
+      snapshots.delete(tabId); snapshots.set(tabId, img.resize({ width: PREVIEW_W * 2 }).toDataURL())
+      while (snapshots.size > 24) snapshots.delete(snapshots.keys().next().value) // keep memory bounded
+    }
   } catch {}
 }
 const GMAIL_SCRAPE = `(() => [...document.querySelectorAll('tr.zA')].slice(0, 10).map((r, i) => ({
@@ -1371,7 +1463,7 @@ function hideFavPreview (delay = 0) {
   }, delay)
 }
 Object.assign(LATE_ACTIONS, {
-  'fav-hover': (id, rect) => showFavPreview(id, rect && { x: +rect.x, y: +rect.y, width: +rect.width, height: +rect.height }),
+  'fav-hover': (id, rect) => { preconnect(tab(id)?.url); showFavPreview(id, rect && { x: +rect.x, y: +rect.y, width: +rect.width, height: +rect.height }) },
   'fav-hover-end': () => hideFavPreview(280),
   'preview-hold': () => clearTimeout(previewTimer),
   'preview-release': () => hideFavPreview(200),
@@ -1443,7 +1535,7 @@ function ensurePopView () {
   if (popView) return popView
   popView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
   popView.setBackgroundColor('#00000000')
-  popView.webContents.loadFile(path.join(UI_DIR, 'popover.html'))
+  popView.webContents.loadURL(uiURL('popover.html'))
   popView.webContents.on('will-navigate', e => e.preventDefault())
   popView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   return popView
@@ -1467,6 +1559,7 @@ const PLUS_ITEMS = [
   { id: 'new-folder', label: 'New Folder', icon: 'folder' },
   '-',
   { id: 'boost', label: 'New Boost', icon: 'boost' },
+  { id: 'visual', label: 'New Visual', icon: 'visual' },
   '-',
   { id: 'split', label: 'New Split', icon: 'split', keys: '⌃⇧=' },
   { id: 'new-tab', label: 'New Tab', icon: 'newtab', keys: '⌘T' }
@@ -1534,12 +1627,13 @@ function setSiteSetting (key, value) {
 async function screenshotPage () {
   const v = views.get(activeTabId()); if (!v) return
   const img = await v.webContents.capturePage()
-  clipboard.writeImage(img)
+  await clipboard.write([new ClipboardItem({ 'image/png': new Blob([img.toPNG()], { type: 'image/png' }) })]) // Electron 45+ async clipboard
   const file = path.join(downloadDir(), `Screenshot ${new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)}.png`)
   fs.writeFileSync(file, img.toPNG())
   const d = { id: uid('d'), name: path.basename(file), path: file, received: 1, total: 1, state: 'completed', startedAt: Date.now(), doneAt: Date.now() }
   downloads.unshift(d); downloadThumb(d); store.save(); pushState()
   toast('Screenshot copied and saved to Downloads')
+  return file
 }
 function shareUrl () {
   const t = tab(activeTabId()); if (!t) return
@@ -1557,7 +1651,37 @@ function siteMoreMenu () {
     { label: 'Reset All Settings for This Site', click: () => { try { const u = new URL(t.url); delete S.permissions[u.origin]; delete S.siteFlags?.[u.hostname]; store.save(); toast('Site settings reset') } catch {} } }
   ]).popup({ window: win })
 }
+// ---------------------------------------------------------------- speed: warm up connections, task manager
+const preconnected = new Map()
+function preconnect (url) {
+  if (typeof url !== 'string' || !/^https:\/\//.test(url)) return
+  let origin; try { origin = new URL(url).origin } catch { return }
+  if (Date.now() - (preconnected.get(origin) || 0) < 30e3) return
+  preconnected.set(origin, Date.now()); if (preconnected.size > 200) preconnected.delete(preconnected.keys().next().value)
+  try { getSession(space().profileId).preconnect({ url: origin, numSockets: 1 }) } catch {}
+}
+function tabMemory () {
+  const byPid = new Map(app.getAppMetrics().map(m => [m.pid, m.memory?.workingSetSize || 0]))
+  const rows = []
+  for (const [id, v] of views) {
+    if (v.webContents.isDestroyed() || !tab(id)) continue
+    rows.push({ id, title: tab(id).customTitle || tab(id).title, kb: byPid.get(v.webContents.getOSProcessId()) || 0 })
+  }
+  const totalKb = [...byPid.values()].reduce((a, b) => a + b, 0)
+  return { rows: rows.sort((a, b) => b.kb - a.kb), totalKb }
+}
+function taskManager () {
+  const { rows, totalKb } = tabMemory()
+  const mb = (kb) => (kb / 1024).toFixed(0) + ' MB'
+  pick(`Task Manager — Drift is using ${mb(totalKb)} · ${rows.length} loaded tab${rows.length === 1 ? '' : 's'} (pick one to unload it)`,
+    rows.map(r => ({ value: r.id, title: `${mb(r.kb).padStart(7)}   ${r.title}` })), (id) => {
+      const loc = locate(id); if (!loc) return
+      if (id === activeTabId()) return toast('That tab is open — switch away first, or close it')
+      destroyView(id); pushState(); toast('Tab unloaded — it reloads when you open it')
+    })
+}
 Object.assign(LATE_ACTIONS, {
+  preconnect: (url) => preconnect(url),
   'plus-menu': (rect) => plusMenu(rect),
   'site-controls': (rect) => siteControls(rect),
   'popover-close': () => closePopover(),
@@ -1567,6 +1691,7 @@ Object.assign(LATE_ACTIONS, {
       if (id === 'new-space') return runCommand('new-space')
       if (id === 'new-folder') return newFolder()
       if (id === 'boost') return boostSite()
+      if (id === 'visual') return chooseVisual()
       if (id === 'split') return runCommand('split')
       if (id === 'new-tab') return commandBar('new')
     }
@@ -1582,6 +1707,67 @@ Object.assign(LATE_ACTIONS, {
   },
   'site-setting': (key, value) => setSiteSetting(String(key), String(value))
 })
+
+// ---------------------------------------------------------------- Create Visual (slide deck / poster / infographic / dashboard)
+const VISUAL_PREFIX = 'drift://visual/'
+function showVisual (wc, file) {
+  if (!wc || wc.isDestroyed()) return
+  let html; try { html = fs.readFileSync(file) } catch { return showErrorPage(wc, { kind: 'error', url: 'Visual', code: 'missing', desc: 'This visual was deleted' }) }
+  wc.loadURL('data:text/html;charset=utf-8;base64,' + html.toString('base64')).catch(() => {})
+}
+function visualFile (url) {
+  if (typeof url !== 'string' || !url.startsWith(VISUAL_PREFIX)) return null
+  const id = url.slice(VISUAL_PREFIX.length).replace(/[^\w-]/g, '')
+  return id ? path.join(visuals.visualDir(app.getPath('userData')), id + '.html') : null
+}
+function chooseVisual () {
+  if (!activeTabId()) return toast('Open the page you want to turn into a visual')
+  pick('Create a visual from this page', Object.entries(visuals.KINDS).map(([k, v]) => ({ value: k, title: v.label })), (kind) => {
+    setTimeout(() => prompt(`${visuals.KINDS[kind].label}: anything specific? (audience, tone, brand colours) — optional`, '', (notes) => { if (notes != null) createVisual(kind, notes) }))
+  })
+}
+async function createVisual (kind, notes = '', { generate } = {}) {
+  if (!visuals.KINDS[kind]) return
+  const page = await pageForChat()
+  if (!page || !page.text.trim()) return toast('Open a page with content first')
+  const label = visuals.KINDS[kind].label
+  // No API key: hand the request to Claude on claude.ai (your Pro / Max / Team plan) instead
+  if (!generate && !claudeKey() && !process.env.ANTHROPIC_API_KEY) {
+    if (!accountMode()) setClaudeMode('account')
+    toggleChat(true)
+    const body = page.text.length > MAX_SHARED_CHARS ? page.text.slice(0, MAX_SHARED_CHARS) : page.text
+    const ask = `Create ${visuals.KINDS[kind].brief} Build it as an HTML artifact from the web page below.${notes ? ' ' + notes : ''}\nTitle: ${page.title}\nURL: ${page.url}\n\n${body}`
+    if (!(await typeIntoClaude(ask))) { clipboard.writeText(ask); toast('Copied the request — paste it into Claude (⌘V)') } else toast(`Press Enter in Claude to create your ${label.toLowerCase()}`)
+    return 'account'
+  }
+  const id = uid('v'); const userData = app.getPath('userData')
+  visuals.write(userData, id, visuals.placeholder(kind, page.title))
+  const tid = newTab(VISUAL_PREFIX + id)
+  try {
+    const html = await (generate || visuals.generate)({ kind, page, notes, colors: space().theme.colors, apiKey: claudeKey(), model: S.settings.claudeModel })
+    visuals.write(userData, id, visuals.harden(html))
+    toast(`${label} ready — “Export Visual as PDF” is in the command bar`)
+  } catch (e) {
+    const msg = visuals.describe(e)
+    visuals.write(userData, id, visuals.harden(`<title>Couldn’t create ${label}</title><body style="font:16px system-ui;display:grid;place-items:center;height:90vh"><p>${msg.replace(/[<>&]/g, '')}</p></body>`))
+    toast(msg)
+  }
+  showVisual(views.get(tid)?.webContents, visualFile(VISUAL_PREFIX + id))
+  return tid
+}
+async function exportVisualPdf (tabId = activeTabId()) {
+  const t = tab(tabId); const wc = views.get(tabId)?.webContents
+  if (!t || !wc || !visualFile(t.url)) return toast('Open a visual created by Drift first')
+  const pdf = await wc.printToPDF({ printBackground: true, preferCSSPageSize: true })
+  const name = (t.title || 'Visual').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80) || 'Visual'
+  let file = path.join(downloadDir(), name + '.pdf')
+  for (let i = 1; fs.existsSync(file); i++) file = path.join(downloadDir(), `${name} (${i}).pdf`)
+  fs.writeFileSync(file, pdf)
+  const d = { id: uid('d'), name: path.basename(file), path: file, received: pdf.length, total: pdf.length, state: 'completed', startedAt: Date.now(), doneAt: Date.now() }
+  downloads.unshift(d); downloadThumb(d); store.save(); pushState()
+  toast(`Saved ${d.name} to Downloads`)
+  return file
+}
 
 // ---------------------------------------------------------------- Peek
 let peekView = null
@@ -1633,7 +1819,7 @@ function openMini (url) {
   m.contentView.addChildView(view)
   const lay = () => { const [w, h] = m.getContentSize(); view.setBounds({ x: 6, y: 38, width: w - 12, height: h - 44 }) }
   lay(); m.on('resize', lay)
-  m.loadFile(path.join(UI_DIR, 'mini.html'))
+  m.loadURL(uiURL('mini.html'))
   const wc = view.webContents
   wc.setWindowOpenHandler(({ url: u }) => { if (isSafeWebUrl(u)) wc.loadURL(u); return { action: 'deny' } })
   wc.on('will-navigate', (e) => guardNavigation(e, e.url, wc))
@@ -1676,7 +1862,7 @@ function ensureChatView () {
   if (chatView) return chatView
   chatView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
   chatView.setBorderRadius?.(10)
-  chatView.webContents.loadFile(path.join(UI_DIR, 'chat.html'))
+  chatView.webContents.loadURL(uiURL('chat.html'))
   chatView.webContents.on('will-navigate', e => e.preventDefault())
   chatView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   return chatView
@@ -1712,7 +1898,7 @@ function ensureClaudeAccountViews () {
   if (!claudeBar) {
     claudeBar = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
     claudeBar.setBorderRadius?.(10)
-    claudeBar.webContents.loadFile(path.join(UI_DIR, 'claude-bar.html'))
+    claudeBar.webContents.loadURL(uiURL('claude-bar.html'))
     claudeBar.webContents.on('will-navigate', e => e.preventDefault())
     claudeBar.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   }
@@ -1733,7 +1919,7 @@ function ensureClaudeAccountViews () {
     })
     wc.on('will-navigate', (e) => guardNavigation(e, e.url, wc))
     wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
-      if (isMain && code !== -3) wc.loadFile(ERROR_PAGE, { query: { kind: 'error', url, code: String(code), desc } })
+      if (isMain && code !== -3) showErrorPage(wc, { kind: 'error', url, code: String(code), desc })
     })
     wc.on('context-menu', (_e, p) => {
       const items = []
@@ -1900,17 +2086,18 @@ function openSettings (page, spaceId) {
     titleBarStyle: isMac ? 'hiddenInset' : 'default', backgroundColor: nativeTheme.shouldUseDarkColors ? '#2b2826' : '#f4f2f7',
     webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false }
   })
-  settingsWin.loadFile(path.join(UI_DIR, 'settings.html'))
+  settingsWin.loadURL(uiURL('settings.html'))
   settingsWin.webContents.on('will-navigate', e => e.preventDefault())
   settingsWin.once('ready-to-show', () => settingsWin.show())
 }
-function mcpBridgePath () { return path.join(__dirname, '..', 'mcp', 'bridge.js') }
+// Packaged: the bridge is unpacked from app.asar so a plain `node` can run it (Drift's RunAsNode fuse is off)
+function mcpBridgePath () { return path.join(__dirname, '..', 'mcp', 'bridge.js').replace(/app\.asar([\\/])/, 'app.asar.unpacked$1') }
 function mcpConfigFile () { return path.join(app.getPath('userData'), 'drift-mcp.json') }
 function settingsData () {
   const spacesPer = (pid) => S.spaces.filter(s => s.profileId === pid).length
   const perms = Object.entries(S.permissions).map(([origin, m]) => ({ origin, list: Object.entries(m).map(([k, v]) => `${k}: ${v}`).join(', ') }))
-  const env = { ELECTRON_RUN_AS_NODE: '1', DRIFT_MCP_CONFIG: mcpConfigFile() }
-  const cfg = { mcpServers: { drift: { command: process.execPath, args: [mcpBridgePath()], env } } }
+  const env = { DRIFT_MCP_CONFIG: mcpConfigFile() }
+  const cfg = { mcpServers: { drift: { command: 'node', args: [mcpBridgePath()], env } } }
   return {
     page: settingsPage,
     focusSpace: settingsSpace,
@@ -1923,9 +2110,10 @@ function settingsData () {
     profiles: S.profiles.map(p => ({ id: p.id, name: p.name, spaces: spacesPer(p.id) })),
     permissions: perms,
     passwordCount: passwords.count,
+    threatFeed: safebrowsing.size ? `${safebrowsing.size.toLocaleString()} known malware & phishing sites (abuse.ch URLhaus, OpenPhish), checked on your Mac` : 'Threat lists download on first run',
     adblock: adblock.ready ? `Filter lists active (EasyList, EasyPrivacy${S.settings.strictBlocking ? ', annoyances' : ''}) + built-in list` : 'Built-in list active — filter lists download on first run',
     mcpConfig: JSON.stringify(cfg, null, 2),
-    mcpCli: `claude mcp add drift --env ELECTRON_RUN_AS_NODE=1 --env DRIFT_MCP_CONFIG="${mcpConfigFile()}" -- "${process.execPath}" "${mcpBridgePath()}"`,
+    mcpCli: `claude mcp add drift --env DRIFT_MCP_CONFIG="${mcpConfigFile()}" -- node "${mcpBridgePath()}"`,
     claudeModels: CLAUDE_MODELS,
     hasClaudeKey: !!claudeKey(),
     claudeMode: S.settings.claudeMode,
@@ -2223,6 +2411,8 @@ function pushState () {
     sidebarPeek,
     chatOpen,
     tidyTabs: S.settings.tidyTabs,
+    dimUnloaded: S.settings.dimUnloaded,
+    pinnedResetButton: S.settings.pinnedResetButton,
     sidebarWidth: S.settings.sidebarWidth,
     nav: { canBack: l?.canBack, canFwd: l?.canFwd, loading: l?.loading, url: tab(act)?.url || '', blocked: l?.blocked || 0 },
     settings: { blocker: S.settings.blocker, httpsOnly: S.settings.httpsOnly },
@@ -2309,7 +2499,16 @@ const ACTIONS = {
     newTab(url)
   },
   'prompt-result': (key, value) => { closeOverlay(); const cb = pending[key]; delete pending[key]; if (cb && value != null) cb(value) },
-  find: (text, opts) => { const wc = views.get(activeTabId())?.webContents; if (!wc) return; if (!text) wc.stopFindInPage('clearSelection'); else wc.findInPage(text, opts) }
+  find: async (text, dir, opts) => {
+    const wc = views.get(activeTabId())?.webContents; if (!wc) return
+    if (opts && typeof opts === 'object') {
+      for (const [k, key] of [['highlightAll', 'findHighlightAll'], ['matchCase', 'findMatchCase'], ['diacritics', 'findDiacritics'], ['wholeWords', 'findWholeWords']]) if (typeof opts[k] === 'boolean') S.settings[key] = opts[k]
+      store.save()
+    }
+    const o = { highlightAll: S.settings.findHighlightAll, matchCase: S.settings.findMatchCase, diacritics: S.settings.findDiacritics, wholeWords: S.settings.findWholeWords }
+    const r = await finder.find(wc, text, o, ['next', 'prev'].includes(dir) ? dir : 'new', space().theme.colors[0])
+    overlay?.webContents.send('find-result', { matches: r.matches, activeMatchOrdinal: r.active, finalUpdate: true })
+  },
 }
 Object.assign(ACTIONS, LATE_ACTIONS)
 let uiSender = null // webContents that sent the IPC action being handled
@@ -2454,7 +2653,7 @@ function createWindow () {
     icon: path.join(__dirname, '..', '..', 'build', 'icon.png'),
     webPreferences: { preload: fs.existsSync(MAIN_PRELOAD) ? MAIN_PRELOAD : PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false }
   })
-  win.loadFile(path.join(UI_DIR, 'index.html'))
+  win.loadURL(uiURL('index.html'))
   win.webContents.on('will-navigate', e => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.once('ready-to-show', () => win.show())
@@ -2547,7 +2746,9 @@ app.whenReady().then(() => {
     for (const sp of S.spaces) { for (const id of sp.today) { archiveEntry(S.tabs[id], sp.id); delete S.tabs[id] } sp.today = []; sp.split = null }
     sanitizeState()
   }
+  safebrowsing.start(app.getPath('userData')).then(() => console.log('threat feeds:', safebrowsing.size))
   if (S.settings.blocker) adblock.load(app.getPath('userData'), { strictMode: S.settings.strictBlocking }).then(r => console.log('adblock:', r))
+  serveUI()
   buildMenu()
   createWindow()
   applyIcon()
@@ -2577,4 +2778,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })

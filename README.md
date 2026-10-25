@@ -1,8 +1,14 @@
 # Drift
 
-A calm, sidebar-first web browser for macOS, built on **Chromium** (via Electron 38). It has
+A calm, sidebar-first web browser for macOS, built on **Chromium** (via Electron 45). It has
 vertical tabs, spaces with colour themes, separate profiles, favourites, pinned tabs, a
 keyboard command bar, split view, a window with no toolbar, and tabs that archive themselves.
+
+## Install
+
+Download **Drift-x.y.z-arm64.dmg** (Apple Silicon) or **Drift-x.y.z.dmg** (Intel) from [Releases](https://github.com/NishanthAnand21/drift/releases), open it, and drag **Drift** into Applications.
+
+Release builds are ad-hoc signed, not signed with an Apple Developer ID, so macOS will warn the first time. To open Drift anyway, try right-click → **Open**. If that doesn't work, go to **System Settings → Privacy & Security → Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Drift.app`. Adding Developer ID secrets to the repository (see below) produces fully signed and notarised builds.
 
 ## Run (development)
 
@@ -36,6 +42,9 @@ Regenerate the icon from `build/icon.svg` with `npm run icon`.
 | Site controls | The sliders icon in the URL pill opens a card with Share, Boost, Screenshot (copied and saved to Downloads) and Site Inspector, your extensions, and this site's settings: camera & microphone, location, notifications, screen sharing, clipboard, MIDI, automatic Picture-in-Picture, pop-ups, and ad blocking. Click a setting to change it. The 🔒 Secure / ⚠ Not Secure footer opens the certificate details, and ⋯ holds zoom, clearing the site's cookies, and resetting its settings. |
 | Downloads | The bottom-left button opens the downloads panel: Quick Look thumbnails, file names, “15 hours ago”, and live progress. Click to open, drag into Finder or another app, or right-click for Show in Finder, Pause/Resume, Cancel, Copy Path, Remove or Move to Trash. The list is kept across restarts. |
 | Themes | Each space has its own theme, edited in **Settings → Spaces** (or right-click a space → Edit Theme & Icon): 12 presets, or up to 3 colours blended into a gradient, Light / Dark / Auto, colour intensity, grain, and an emoji icon. Themes sync along with your spaces. |
+| Better unloaded tabs | Tabs and Favorites that aren't loaded are shown greyscale and faded, so you can see what's using memory. Turn it off in Settings → Advanced, which also has a switch to hide the ↑ back-to-pinned-page button. |
+| Find bar (⌘F) | A floating bar in your space's colours with **Highlight All**, **Match Case**, **Match Diacritics** (when off, “exámple” matches “example”) and **Whole Words**, plus “1 of 4 matches” and ↑/↓. It runs in an isolated world and paints matches with the browser's CSS Custom Highlight API, so the page itself is never modified. Your choices are remembered. |
+| Create Visual | **+ → New Visual** or the command bar turns the page you're on into a **slide deck, poster, infographic or dashboard** in your space's colours. It reads your open tab, so it works behind logins too. With an API key, Claude builds it into a tab, and **Export Visual as PDF** saves it to Downloads. Generated visuals have scripts stripped and run under a no-script Content-Security-Policy. Without a key, the request and page are typed into Claude on claude.ai, which builds it as an artifact using your plan. |
 | No-toolbar window | Inset traffic lights. The sidebar holds back/forward/reload and the URL pill. ⌘S hides the sidebar; hover the left edge to peek at it. |
 | Command bar | **⌘T** opens a new tab. **⌘L** edits the current URL. It searches open tabs, history, archived tabs and commands, shows live search suggestions, and is used for every setting. |
 | Spaces | Ctrl+1…9 or ⌘⌥←/→ to switch. Click **＋** at the bottom or press ⌘⇧N to create one. Right-click a space dot to rename it, change its colour (the whole window is tinted) or change its profile. |
@@ -61,7 +70,7 @@ Regenerate the icon from `build/icon.svg` with `npm run icon`.
   - **Your Claude account (default, no API key):** the panel shows the official claude.ai, where you sign in with your Pro, Max or Team plan, so usage counts against your plan. It runs in its own isolated session: Drift never sees your Claude password or session, and websites can't reach it. **＋ Add page** types the current tab's text into Claude's message box so you can add your question. Typing `claude` then **Tab** in the command bar asks a question there. **Sign Out** clears Drift's claude.ai session.
   - **An API key (optional, pay-per-use):** a native chat built on the official Anthropic SDK, with Claude Opus 5.5 by default (Sonnet 5.5 or Haiku 5.5 also available) and adjustable effort. A refused request is retried automatically on Anthropic's recommended fallback model. The key is stored encrypted in the Keychain; `ANTHROPIC_API_KEY` or `ant auth login` also work. In this mode, page text is wrapped as untrusted content, and very long pages are shortened with a notice.
   - Drift doesn't extract a Pro/Max login to make API calls for you, because Anthropic's terms only allow subscription logins in Anthropic's own apps. Signing in on claude.ai, as above, is the supported way to use your plan.
-- **MCP:** turn on **Settings → Integrations → Allow MCP clients**, then copy the shown JSON into `claude_desktop_config.json` (Claude Desktop), or run the shown `claude mcp add …` command (Claude Code).
+- **MCP:** turn on **Settings → Integrations → Allow MCP clients**, then copy the shown JSON into `claude_desktop_config.json` (Claude Desktop), or run the shown `claude mcp add …` command (Claude Code). The bridge needs Node.js 18 or newer (`node` on your PATH).
   - Tools: `list_tabs`, `open_url`, `switch_tab`, `close_tab`, `get_page_text` (needs a separate opt-in), `search_history`, `list_spaces`, `switch_space`, `search_archive`, `inspect_site`.
   - The server only listens on 127.0.0.1, needs a random token on every call, and ignores requests from web pages.
 - **Site Inspector (⌘⇧I or the ⓘ in the URL pill) shows:**
@@ -100,6 +109,24 @@ The **Library** (▤ at the bottom of the sidebar) lists media that's playing, d
 - Popups that sites need for sign-in (such as OAuth) open sandboxed; everything else opens as a tab.
 - Each profile is isolated in its own storage partition. Use **Clear Browsing Data** to wipe history, cookies and cache.
 - The user agent looks like a normal Chrome, so sites don't treat Drift differently.
+
+- **Dangerous-site protection:** Drift checks pages against the abuse.ch URLhaus malware list and the OpenPhish phishing list. The lists are downloaded every 6 hours and checked on your Mac; nothing you browse is sent anywhere. Phishing entries match on host *and* path, so a shared host isn't blocked entirely. Blocked pages show a red warning with **Back to safety**, plus **Continue anyway** if you choose to proceed.
+- **Hardened binary (Electron fuses):**
+  - Cookies are encrypted with the macOS Keychain.
+  - App-code integrity is checked at launch, and the app only loads from its archive.
+  - `RunAsNode`, `NODE_OPTIONS` and `--inspect` are disabled, so the signed app can't be used as a Node.js runtime.
+  - `file://` pages get no extra privileges. Drift's own UI is served from a private `drift-ui://` scheme that websites can't read. Its internal pages that open inside tabs, such as error and warning pages and visuals, load as self-contained pages with strict CSPs.
+- **Up-to-date engine:** Electron **45** (current stable Chromium), with every dependency on its latest version. `npm audit` reports 0 vulnerabilities. A vulnerable `adm-zip`, pulled in by the Web Store library, is pinned to the fixed 0.6.1, and Dependabot proposes updates weekly.
+- **Audited:** `npm run security` runs `npm audit` and Doyensec's Electronegativity scanner. Its findings were reviewed: every UI page's CSP now forbids `<base>` and form submissions, and external links refuse network-share schemes (smb/afp/nfs/cifs).
+- **Isolated Claude session:** claude.ai, the MCP endpoint and the extension popups each run in their own session, separate from your browsing profiles.
+
+## Speed & memory
+
+- Tabs load lazily: on launch only the tab you're looking at loads, and the rest restore when you open them.
+- **Memory Saver** unloads tabs you haven't used for 30 minutes (adjustable). Background tabs are throttled. Unloaded tabs are shown greyscale.
+- **Task Manager** (command bar) lists the memory each loaded tab uses; pick one to unload it.
+- Drift connects to a site early (TLS and DNS) as soon as you select it in the command bar or hover a Favorite, so it opens faster.
+- The sidebar only redraws when something actually changes. Favourite snapshots are capped at 24 to keep memory bounded.
 
 ## Updates
 

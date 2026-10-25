@@ -1,6 +1,6 @@
 <!doctype html>
 <html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src https: data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; script-src 'self'; style-src 'self'; img-src https: data:">
 <link rel="stylesheet" href="palette.css"></head>
 <body>
 <div id="backdrop"></div>
@@ -8,7 +8,13 @@
 <div id="report"><header><b id="report-title"></b><button id="report-close">✕</button></header><div id="report-body"></div></div>
 <div id="box">
   <div id="title"></div>
-  <div class="in"><span id="glyph">⌕</span><input id="q" spellcheck="false" autocomplete="off"><span id="count"></span></div>
+  <div class="in"><span id="glyph">⌕</span><input id="q" spellcheck="false" autocomplete="off"><span id="count"></span><span id="findnav"><button id="f-prev" title="Previous (⇧↩)">↑</button><button id="f-next" title="Next (↩)">↓</button><button id="f-close" title="Close (Esc)">✕</button></span></div>
+  <div id="findopts">
+    <label><input type="checkbox" id="o-highlightAll"> Highlight All</label>
+    <label><input type="checkbox" id="o-matchCase"> Match Case</label>
+    <label><input type="checkbox" id="o-diacritics"> Match Diacritics</label>
+    <label><input type="checkbox" id="o-wholeWords"> Whole Words</label>
+  </div>
   <div id="results"></div>
 </div>
 <script src="palette.js"></script>

@@ -85,7 +85,8 @@ const render = {
     sec('Blocking'),
     card(toggle('blocker', 'Block ads & trackers', D.adblock),
       toggle('strictBlocking', 'Strict mode', 'Also hides cookie banners and other annoyances (may break some sites)'),
-      toggle('httpsOnly', 'HTTPS-Only mode', 'Upgrade every site to a secure connection, warn before HTTP')),
+      toggle('httpsOnly', 'HTTPS-Only mode', 'Upgrade every site to a secure connection, warn before HTTP'),
+      toggle('safeBrowsing', 'Dangerous site protection', D.threatFeed)),
     sec('Connection'),
     card(select('proxyMode', 'Proxy', [['system', 'Use system settings'], ['direct', 'No proxy'], ['fixed_servers', 'Manual'], ['pac_script', 'Automatic (PAC URL)']]),
       ...(D.settings.proxyMode === 'fixed_servers' ? [textRow('proxyRules', 'Proxy server', 'e.g. http=proxy:8080;https=proxy:8080 or socks5://host:1080'), textRow('proxyBypass', 'Bypass for', 'e.g. localhost,*.corp.example.com')] : []),
@@ -126,6 +127,8 @@ const render = {
     return el('label', { class: 'row' }, r, el('img', { src: ic.src }), label(ic.name), D.settings.icon === ic.id ? el('span', { class: 'pill' }, 'CURRENT ICON') : null)
   }))],
   advanced: () => [
+    card(toggle('dimUnloaded', 'Better unloaded tabs', 'Show tabs that aren’t loaded in greyscale and faded, so it’s obvious what’s using memory'),
+      toggle('pinnedResetButton', 'Show “back to pinned page” button', 'The ↑ button on pinned tabs that have navigated away from their pinned page')),
     card(toggle('pipOnLeave', 'Picture in Picture when you leave a video tab', 'The video keeps playing in a small floating window you can move and resize'),
       toggle('pipOnAppSwitch', 'Picture in Picture when you switch to another app', 'The floating video stays on top of other apps; it returns to the page when you come back'),
       toggle('boostsEnabled', 'Enable Boosts on websites you visit', 'Per-site styles — run “Boost This Site” from the command bar'),

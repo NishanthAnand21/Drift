@@ -144,3 +144,12 @@ body.dl-open #dlpanel{display:flex}
 #dl-badge{position:absolute;right:1px;top:1px;min-width:14px;height:14px;border-radius:7px;background:var(--space);color:#fff;font-size:9px;font-weight:700;line-height:14px;text-align:center;padding:0 3px}
 #dl-badge:empty{display:none}
 body.dl-open #b-archive{background:var(--active);opacity:1}
+
+/* Better unloaded tabs: greyscale + transparent until opened */
+body.dim-unloaded .row.unloaded:not(.active) img,body.dim-unloaded .row.unloaded:not(.active) .ph{filter:grayscale(1);opacity:.4}
+body.dim-unloaded .row.unloaded:not(.active) .t{opacity:.5}
+body.dim-unloaded .fav.unloaded:not(.active){background:color-mix(in srgb,var(--fill) 45%,transparent)}
+body.dim-unloaded .fav.unloaded:not(.active) img,body.dim-unloaded .fav.unloaded:not(.active) .ph{filter:grayscale(1);opacity:.38}
+body.dim-unloaded .fav.unloaded:hover img,body.dim-unloaded .row.unloaded:hover img{opacity:.7}
+/* option: hide the “back to pinned page” button */
+body.no-pin-reset .row .home{display:none}

@@ -19,9 +19,21 @@ html,body{margin:0;height:100%;background:transparent;font:14px -apple-system,Bl
 .r .u{flex:1;color:var(--muted);font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .r .k{color:var(--muted);font-size:11.5px}
 body.find #backdrop{display:none}
-body.find #box{left:0;top:0;transform:none;width:100%;animation:none;border-radius:11px}
-body.find .in{height:48px}
-body.find #q{font-size:14px}
+#findnav,#findopts{display:none}
+body.find #box{left:0;top:0;transform:none;width:100%;height:100%;animation:none;border-radius:14px;box-sizing:border-box;padding:10px 12px;
+  background:color-mix(in srgb,var(--space) 12%,var(--bg));box-shadow:0 10px 30px #0004,0 0 0 1px color-mix(in srgb,var(--space) 30%,transparent)}
+body.find .in{height:44px;padding:0 6px 0 12px;border-radius:10px;background:var(--bg);box-shadow:inset 0 0 0 1px #8883}
+body.find #q{font-size:15px}
+body.find #glyph{display:none}
+body.find #findnav{display:flex;gap:2px;margin-left:8px}
+#findnav button{width:30px;height:30px;border:0;border-radius:7px;background:none;color:var(--fg);font-size:14px}
+#findnav button:hover{background:color-mix(in srgb,var(--space) 18%,transparent)}
+body.find #findopts{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;padding:10px 4px 0;font-size:13.5px}
+#findopts label{display:flex;align-items:center;gap:7px;cursor:default}
+#findopts input{width:17px;height:17px;margin:0;accent-color:var(--space)}
+body.find #count{font-size:13px;white-space:nowrap}
+:root[data-mode=dark]{--bg:#25222d;--fg:#ece9f5;--muted:#ece9f588;color-scheme:dark}
+:root[data-mode=light]{--bg:#fbfaff;--fg:#211d2b;--muted:#211d2b88;color-scheme:light}
 
 .grp{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:10px 18px 4px}
 #peekbar,#report{display:none}
