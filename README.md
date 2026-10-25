@@ -39,6 +39,13 @@ Regenerate the icon from `build/icon.svg` with `npm run icon`.
 | Auto-archive | Unpinned tabs not used for 12 h (you can choose 24 h, 7 d, 30 d or never) move to the archive. ⌘⇧A or ⌂ shows the archive, and the command bar searches it. **↓ Clear** archives today's tabs now. |
 | Other | ⌘F find in page, ⌘⇧T reopen a closed tab, ⌘⇧C copy the URL, ⌘1…9 jump to a tab, Ctrl+Tab cycle tabs, ⌘± zoom, ⌘⌥I DevTools, per-tab mute, downloads in the sidebar, crash and error pages, opens links when set as the default browser. |
 
+## Extensions, passwords, sync, private windows
+
+- **Extensions:** run **Get Extensions** in the command bar to open the Chrome Web Store, where **Add to Chrome** installs into Drift (you confirm the permissions first). Extension buttons appear at the top of the sidebar. Use **Manage Extensions…** for options or removal, and **Load Unpacked Extension…** for local folders. Installed extensions update automatically. Powered by `electron-chrome-extensions` (GPL-3.0 for personal and open-source use; closed-source distribution needs its commercial licence).
+- **Passwords:** Drift offers to save logins when you submit a form. Click a login field to autofill, or to get a strong-password suggestion on sign-up forms. Passwords are encrypted with the macOS Keychain and only filled into the exact HTTPS origin they were saved for, after a real click. **Passwords…** needs Touch ID before it copies a password, and clears the clipboard after 30 s. **Import Passwords from CSV** accepts Chrome, Arc and 1Password exports; **Export Passwords** also needs Touch ID.
+- **Sync:** run **Set Up Sync…**, pick a folder every Mac can see (iCloud Drive is suggested), and choose a passphrase. Spaces, pinned tabs, favourites, history and passwords sync every 2 minutes. Files are AES-256-GCM encrypted with a key derived (scrypt) from your passphrase, and each device writes only its own file. No server is involved.
+- **Private window:** **⌘⇧N** opens a separate Drift process with a throw-away profile kept in memory. It stores no history, passwords or extensions, and everything is deleted when you close it.
+
 ## Security & privacy
 
 - Every web page runs in Chromium's **sandbox**, with context isolation and no Node.js access. Pages can't create `<webview>`s, and the UI is locked down with a strict CSP.

@@ -1,6 +1,6 @@
 'use strict'
 // Scripted end-to-end smoke test: DRIFT_SELFTEST=<outdir> electron .
-const fs = require('fs'); const path = require('path'); const os = require('os')
+const fs = require('fs'); const path = require('path'); const os = require('os') // eslint-disable-line
 module.exports = (D) => {
   const out = process.env.DRIFT_SELFTEST
   D.app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'drift-test-')))
@@ -38,6 +38,35 @@ module.exports = (D) => {
       D.tab(w).lastActiveAt = 0; D.activateTab(D.newTab('about:blank'))
       D.autoArchive(); ok('auto-archive', !D.tab(w) && D.S.archive.some(x => x.url.includes('github')))
       D.createSpace('Private', { newProfile: true }); ok('space with separate profile', D.S.profiles.length === 2)
+      // passwords: save + fetch round-trip, encrypted on disk
+      D.passwords.upsert('https://nodejs.org', 'me@example.com', 's3cret-PW', { silent: true })
+      await wait(400)
+      const pwFile = fs.readFileSync(path.join(D.app.getPath('userData'), 'drift-passwords.json'), 'utf8')
+      ok('password saved, not stored in plain text', D.passwords.list().some(e => e.username === 'me@example.com') && !pwFile.includes('s3cret-PW'))
+      // sync: two devices through a folder
+      const sync = require('./sync'); const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-sync-'))
+      const remote = { deviceId: 'devB', profiles: [{ id: 'default', name: 'Personal', updatedAt: Date.now() + 1e4, favorites: [{ id: 'tR', url: 'https://registry.npmjs.org/', title: 'npm' }] }], spaces: [{ id: 'sR', name: 'From Mac B', color: '#16a34a', profileId: 'default', updatedAt: Date.now(), pinned: [] }], tombstones: {}, history: [], passwords: { entries: [{ origin: 'https://github.com', username: 'b', password: 'pw-b', updatedAt: Date.now() }], tombstones: {} } }
+      fs.mkdirSync(path.join(dir, 'Drift Sync')); fs.writeFileSync(path.join(dir, 'Drift Sync', 'devB.drift'), sync.encrypt(remote, 'correct horse'))
+      Object.assign(D.S.sync, { enabled: true, folder: dir, deviceId: 'devA' })
+      const r = sync.syncNow({ S: D.S, passphrase: 'correct horse', passwords: D.passwords, newTabId: () => 'tX' + Math.random() })
+      ok('sync merges remote device', r.devices === 1 && D.S.spaces.some(s => s.name === 'From Mac B') && D.passwords.list().some(e => e.host === 'github.com'), JSON.stringify(r.errors))
+      const mine = fs.readFileSync(path.join(dir, 'Drift Sync', 'devA.drift'), 'utf8')
+      ok('sync file encrypted', !mine.includes('s3cret') && !mine.includes('nodejs') && sync.decrypt(mine, 'correct horse').deviceId === 'devA')
+      let bad = false; try { sync.decrypt(mine, 'wrong') } catch { bad = true }; ok('wrong passphrase rejected', bad)
+      // extensions: load an unpacked MV3 extension with a content script
+      const ext = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-ext-'))
+      fs.writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify({ manifest_version: 3, name: 'Drift Test Ext', version: '1.0', action: { default_title: 'T' }, content_scripts: [{ matches: ['https://nodejs.org/*'], js: ['c.js'], run_at: 'document_end' }] }))
+      fs.writeFileSync(path.join(ext, 'c.js'), "document.documentElement.dataset.driftExt = 'yes'")
+      const ses = D.views.get(a).webContents.session
+      await (ses.extensions || ses).loadExtension(ext)
+      D.activateTab(a); D.views.get(a).webContents.reload(); await loaded(a); await wait(800)
+      const mark = await D.views.get(a).webContents.executeJavaScript("document.documentElement.dataset.driftExt || ''")
+      ok('extension content script runs', mark === 'yes')
+      // private window: spawns a separate process with its own temp profile
+      const before = Date.now(); D.runCommand('private'); await wait(4000)
+      const priv = require('child_process').execSync('ps aux').toString().includes('--drift-private')
+      ok('private window process launched', priv)
+      try { require('child_process').execSync("pkill -f -- '--drift-private'") } catch {}
       D.switchSpace('home'); await wait(500)
       D.ACTIONS['toggle-sidebar'](); await wait(400); await shot('4-sidebar-hidden'); D.ACTIONS['toggle-sidebar']()
     } catch (e) { ok('exception', false, e.stack) }

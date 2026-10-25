@@ -93,6 +93,7 @@ api.on('open', (o) => {
   document.getElementById('glyph').textContent = o.mode === 'find' ? '⌕' : o.mode === 'prompt' ? '✎' : o.mode === 'split' ? '◫' : '⌕'
   document.getElementById('count').textContent = ''
   q.placeholder = { find: 'Find in page', prompt: '', pick: 'Filter…', archive: 'Search archived tabs…', split: 'Search or enter URL for the right pane…' }[o.mode] ?? 'Search, enter URL or run a command…'
+  q.type = o.secret ? 'password' : 'text'
   q.value = o.query || ''
   render(); q.focus(); q.select()
 })

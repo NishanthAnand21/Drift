@@ -83,6 +83,13 @@ function render () {
   document.body.classList.toggle('mac', S.isMac)
   document.body.classList.toggle('fullscreen', S.fullscreen)
   document.body.classList.toggle('has-tab', !!S.activeTabId)
+  document.body.classList.toggle('private', !!S.private)
+  const ex = $('#exts')
+  if (ex) {
+    ex.style.display = S.extensions ? '' : 'none'
+    if (ex.getAttribute('partition') !== S.partition) ex.setAttribute('partition', S.partition)
+    if (S.activeWcId && ex.getAttribute('tab') !== String(S.activeWcId)) ex.setAttribute('tab', String(S.activeWcId))
+  }
   $('#b-back').disabled = !S.nav.canBack
   $('#b-fwd').disabled = !S.nav.canFwd
   $('#b-reload').textContent = S.nav.loading ? '✕' : '↻'

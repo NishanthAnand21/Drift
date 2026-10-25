@@ -1,16 +1,22 @@
 'use strict'
 const {
   app, BrowserWindow, WebContentsView, Menu, ipcMain, session, dialog, shell,
-  clipboard, net, nativeTheme, desktopCapturer, Notification
+  clipboard, net, nativeTheme, desktopCapturer
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const os = require('os')
+const { spawn } = require('child_process')
 const { Store } = require('./store')
 const { isBlockedHost } = require('./blocker')
+const { createPasswords } = require('./passwords')
+const sync = require('./sync')
 
 const isMac = process.platform === 'darwin'
 const UI_DIR = path.join(__dirname, '..', 'ui')
 const PRELOAD = path.join(__dirname, '..', 'preload', 'ui.js')
+const MAIN_PRELOAD = path.join(__dirname, '..', 'preload', 'ui-main.js')
+const WEB_PRELOAD = path.join(__dirname, '..', 'preload', 'web.js')
 const ERROR_PAGE = path.join(__dirname, '..', 'web', 'error.html')
 
 // Sandbox every renderer (skipped only when running as root, e.g. Linux CI containers)
@@ -19,7 +25,14 @@ if (process.getuid?.() !== 0) app.enableSandbox()
 app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling')
 app.commandLine.appendSwitch('enable-features', 'StrictOriginIsolation')
 
-if (!app.requestSingleInstanceLock()) app.quit()
+// Private windows run as a separate process with throw-away, in-memory storage
+const PRIVATE = process.argv.includes('--drift-private')
+let privateDir = null
+if (PRIVATE) {
+  privateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-private-'))
+  app.setPath('userData', privateDir)
+  app.setName('Drift Private')
+} else if (!app.requestSingleInstanceLock()) app.quit()
 
 // ---------------------------------------------------------------- state
 const HOUR = 3600e3
@@ -50,10 +63,13 @@ const DEFAULTS = {
   history: [],
   permissions: {},
   activeSpaceId: 'home',
-  sidebarVisible: true
+  sidebarVisible: true,
+  sync: { enabled: false, folder: null, deviceId: null, keyEnc: null, tombstones: {}, lastSyncAt: 0 }
 }
+if (PRIVATE) Object.assign(DEFAULTS.spaces[0], { name: 'Private', color: '#55525e' })
 
-let store, S
+let store, S, passwords
+const extensionsBySession = new Map() // session -> ElectronChromeExtensions
 let win = null
 let overlay = null // command bar / find bar / prompts
 let overlayOpen = null // { mode, ... }
@@ -87,7 +103,7 @@ function profileIdOfTab (tabId) {
   if (!loc) return space().profileId
   return loc.space ? loc.space.profileId : loc.profile.id
 }
-const partitionFor = (profileId) => `persist:profile-${profileId}`
+const partitionFor = (profileId) => (PRIVATE ? `private-${profileId}` : `persist:profile-${profileId}`)
 
 // ---------------------------------------------------------------- url helpers
 function normalizeInput (text) {
@@ -98,7 +114,7 @@ function normalizeInput (text) {
   if (!/\s/.test(t) && /^[^\s/]+\.[a-z]{2,}(:\d+)?(\/.*)?$/i.test(t)) return 'https://' + t
   return ENGINES[S.settings.searchEngine].url.replace('%s', encodeURIComponent(t))
 }
-const isSafeWebUrl = (u) => /^(https?:|about:blank)/i.test(u)
+const isSafeWebUrl = (u) => /^(https?:|about:blank|chrome-extension:)/i.test(u)
 
 // ---------------------------------------------------------------- sessions & security
 const CHROME_UA = () => {
@@ -212,6 +228,76 @@ function setupSession (ses) {
     })
   })
   ses.setSpellCheckerEnabled(true)
+  if (!PRIVATE) setupExtensions(ses)
+}
+
+// ---------------------------------------------------------------- Chrome extensions
+const EXT_DIR = () => path.join(app.getPath('userData'), 'Extensions')
+function setupExtensions (ses) {
+  try {
+    const { ElectronChromeExtensions } = require('electron-chrome-extensions')
+    const { installChromeWebStore } = require('electron-chrome-web-store')
+    const ext = new ElectronChromeExtensions({
+      license: 'GPL-3.0',
+      session: ses,
+      createTab: async (details) => {
+        const id = newTab(details.url || 'about:blank', { activate: details.active !== false })
+        return [ensureView(id).webContents, win]
+      },
+      selectTab: (wc) => { const id = wcToTab.get(wc.id); if (id) activateTab(id) },
+      removeTab: (wc) => { const id = wcToTab.get(wc.id); if (id) closeTab(id) },
+      createWindow: async (details) => {
+        const url = [].concat(details.url || [])[0]
+        if (url) newTab(url)
+        return win
+      }
+    })
+    extensionsBySession.set(ses, ext)
+    ext.on('browser-action-popup-created', (popup) => popup.browserWindow?.on?.('closed', () => pushStateSoon()))
+    installChromeWebStore({
+      session: ses,
+      extensionsPath: EXT_DIR(),
+      allowUnpackedExtensions: true,
+      beforeInstall: async (details) => {
+        const { response } = await dialog.showMessageBox(win, {
+          type: 'question', buttons: ['Add Extension', 'Cancel'], defaultId: 1, cancelId: 1,
+          message: `Add “${details.localizedName}”?`,
+          detail: (details.manifest?.permissions || []).length ? 'It can: ' + [...(details.manifest.permissions || []), ...(details.manifest.host_permissions || [])].join(', ') : '',
+          icon: details.icon
+        })
+        if (response === 0) setTimeout(() => { toast(`Added ${details.localizedName}`); pushState() }, 1500)
+        return { action: response === 0 ? 'allow' : 'deny' }
+      }
+    }).then(() => pushStateSoon()).catch(e => console.error('web store', e))
+  } catch (e) { console.error('extensions unavailable', e) }
+}
+const extFor = (tabId) => extensionsBySession.get(getSession(profileIdOfTab(tabId)))
+function allExtensions () {
+  const ses = getSession(space().profileId)
+  return (ses.extensions || ses).getAllExtensions()
+}
+async function loadUnpacked () {
+  const r = await dialog.showOpenDialog(win, { title: 'Choose an unpacked extension folder', properties: ['openDirectory'] })
+  if (r.canceled || !r.filePaths[0]) return
+  const src = r.filePaths[0]
+  if (!fs.existsSync(path.join(src, 'manifest.json'))) return toast('That folder has no manifest.json')
+  for (const p of S.profiles) {
+    const ses = getSession(p.id)
+    try { await (ses.extensions || ses).loadExtension(src, { allowFileAccess: false }) } catch (e) { return toast('Could not load: ' + e.message) }
+  }
+  S.unpackedExtensions = [...new Set([...(S.unpackedExtensions || []), src])]
+  store.save(); toast('Extension loaded'); pushState()
+}
+async function removeExtension (id) {
+  const { uninstallExtension } = require('electron-chrome-web-store')
+  for (const p of S.profiles) {
+    const ses = getSession(p.id); const ex = (ses.extensions || ses).getExtension(id)
+    if (ex) {
+      S.unpackedExtensions = (S.unpackedExtensions || []).filter(x => x !== ex.path)
+      try { await uninstallExtension(id, { session: ses, extensionsPath: EXT_DIR() }) } catch { (ses.extensions || ses).removeExtension(id) }
+    }
+  }
+  store.save(); toast('Extension removed'); pushState()
 }
 
 function getSession (profileId) {
@@ -235,7 +321,8 @@ function ensureView (tabId) {
       allowRunningInsecureContent: false,
       safeDialogs: true,
       navigateOnDragDrop: false,
-      spellcheck: true
+      spellcheck: true,
+      preload: WEB_PRELOAD
     }
   })
   view.setBackgroundColor('#ffffff')
@@ -245,6 +332,7 @@ function ensureView (tabId) {
   wcToTab.set(wc.id, tabId)
   live.set(tabId, { loading: false, canBack: false, canFwd: false, blocked: 0, audible: false, muted: false, zoom: 0 })
   wireWebContents(tabId, wc)
+  extFor(tabId)?.addTab(wc, win)
   const url = t.url && isSafeWebUrl(t.url) ? t.url : 'about:blank'
   wc.loadURL(url).catch(() => {})
   return view
@@ -255,6 +343,7 @@ function destroyView (tabId) {
   if (!view) return
   try { win.contentView.removeChildView(view) } catch {}
   wcToTab.delete(view.webContents.id)
+  try { extFor(tabId)?.removeTab(view.webContents) } catch {}
   if (!view.webContents.isDestroyed()) view.webContents.close()
   views.delete(tabId)
   live.delete(tabId)
@@ -349,6 +438,7 @@ function wireWebContents (tabId, wc) {
 }
 
 function guardNavigation (e, url, wc) {
+  if (url.startsWith('chrome-extension:')) return
   // "Continue to HTTP site" from the HTTPS-Only error page
   if (url.startsWith('http:') && wc.getURL().startsWith('file:') && wc.getURL().includes('kind=https')) {
     try { httpFallbackHosts.add(new URL(url).host) } catch {}
@@ -397,6 +487,8 @@ function pageContextMenu (tabId, wc, p) {
     { type: 'separator' },
     { label: 'Copy Page URL', click: () => copyUrl(tabId) },
     { label: 'Inspect Element', click: () => wc.inspectElement(p.x, p.y) })
+  const extItems = (() => { try { return extFor(tabId)?.getContextMenuItems(wc, p) || [] } catch { return [] } })()
+  if (extItems.length) items.push({ type: 'separator' }, ...extItems)
   Menu.buildFromTemplate(items).popup({ window: win })
 }
 
@@ -423,6 +515,7 @@ function activateTab (tabId) {
   sp.activeTabId = tabId
   tab(tabId).lastActiveAt = Date.now()
   ensureView(tabId)
+  try { extFor(tabId)?.selectTab(views.get(tabId).webContents) } catch {}
   layout()
   if (!overlayOpen) views.get(tabId)?.webContents.focus()
   store.save()
@@ -598,6 +691,7 @@ function deleteSpace (id = S.activeSpaceId) {
   const sp = space(id)
   for (const tid of [...sp.pinned, ...sp.today]) { destroyView(tid); archiveEntry(tab(tid), id); delete S.tabs[tid] }
   S.spaces = S.spaces.filter(s => s.id !== id)
+  S.sync.tombstones[id] = Date.now()
   // drop profiles no space uses any more (keep its data on disk)
   S.profiles = S.profiles.filter(p => p.id === 'default' || S.spaces.some(s => s.profileId === p.id))
   switchSpace(S.spaces[0].id)
@@ -610,6 +704,7 @@ function stepSpace (dir) {
 
 // ---------------------------------------------------------------- history
 function addHistory (url, title) {
+  if (PRIVATE) return
   if (!/^https?:/.test(url)) return
   if (S.history[0]?.url === url) return
   S.history.unshift({ url, title: title || url, t: Date.now() })
@@ -695,9 +790,9 @@ function commandBar (mode = 'new') {
   openOverlay({ mode, query: mode === 'edit' ? t.url : '' })
 }
 
-function prompt (title, value, cb) {
+function prompt (title, value, cb, { secret = false } = {}) {
   const key = uid('k'); pending[key] = cb
-  openOverlay({ mode: 'prompt', title, query: value || '', key })
+  openOverlay({ mode: 'prompt', title, query: value || '', key, secret })
 }
 function pick (title, items, cb) {
   const key = uid('k'); pending[key] = cb
@@ -758,13 +853,117 @@ const COMMANDS = [
   { id: 'print', title: 'Print…', keys: '⌘P', run: () => views.get(activeTabId())?.webContents.print() },
   { id: 'devtools', title: 'Developer Tools', keys: '⌘⌥I', run: () => views.get(activeTabId())?.webContents.toggleDevTools() },
   { id: 'default-browser', title: 'Make Drift the Default Browser', run: () => { app.setAsDefaultProtocolClient('http'); app.setAsDefaultProtocolClient('https'); toast('Requested default browser') } },
-  { id: 'updates', title: 'Check for Updates', run: () => checkForUpdates(true) }
+  { id: 'updates', title: 'Check for Updates', run: () => checkForUpdates(true) },
+  { id: 'private', title: 'New Private Window', keys: '⌘⇧N', run: openPrivateWindow },
+  { id: 'passwords', title: 'Passwords…', run: () => setTimeout(showPasswords) },
+  { id: 'pw-import', title: 'Import Passwords from CSV (Chrome / Arc / 1Password)…', run: importPasswords },
+  { id: 'pw-export', title: 'Export Passwords to CSV…', run: exportPasswords },
+  { id: 'ext-store', title: 'Get Extensions (Chrome Web Store)', run: () => PRIVATE ? toast('Extensions are off in private windows') : newTab('https://chromewebstore.google.com/') },
+  { id: 'ext-manage', title: 'Manage Extensions…', run: () => setTimeout(manageExtensions) },
+  { id: 'ext-unpacked', title: 'Load Unpacked Extension…', run: loadUnpacked },
+  { id: 'sync-setup', title: () => S.sync.enabled ? `Sync: On (${path.basename(S.sync.folder || '')}) — Turn Off` : 'Set Up Sync…', run: () => S.sync.enabled ? disableSync() : setTimeout(setupSync) },
+  { id: 'sync-now', title: 'Sync Now', run: () => runSync(true) }
 ]
 function archiveLabel (ms) {
   if (!ms) return 'Never'
   const h = ms / HOUR
   return h < 24 ? `${h} hours` : h === 24 ? '24 hours' : `${h / 24} days`
 }
+// ---------------------------------------------------------------- passwords UI
+function showPasswords () {
+  const list = passwords.list()
+  if (!list.length) return toast('No saved passwords yet — sign in to a site, or import a CSV')
+  pick(`Saved passwords (${list.length})`, list.map(e => ({ value: e.id, title: `${e.host} — ${e.username || '(no username)'}` })), (id) => {
+    const e = list.find(x => x.id === id)
+    setTimeout(() => pick(`${e.host} — ${e.username}`, [
+      { value: 'copy', title: 'Copy Password' }, { value: 'user', title: 'Copy Username' },
+      { value: 'open', title: 'Open Site' }, { value: 'del', title: 'Delete' }
+    ], async (a) => {
+      if (a === 'copy') passwords.copySecret(id)
+      if (a === 'user') { clipboard.writeText(e.username); toast('Username copied') }
+      if (a === 'open') newTab(e.origin)
+      if (a === 'del') {
+        const { response } = await dialog.showMessageBox(win, { type: 'warning', buttons: ['Delete', 'Cancel'], defaultId: 1, cancelId: 1, message: `Delete the password for ${e.host}?` })
+        if (response === 0) { passwords.remove(id); toast('Password deleted') }
+      }
+    }))
+  })
+}
+async function importPasswords () {
+  const r = await dialog.showOpenDialog(win, { title: 'Import passwords CSV', filters: [{ name: 'CSV', extensions: ['csv'] }], properties: ['openFile'] })
+  if (r.canceled) return
+  try { toast(`Imported ${passwords.importCsv(r.filePaths[0])} passwords`) } catch (e) { toast('Import failed: ' + e.message) }
+}
+async function exportPasswords () {
+  const r = await dialog.showSaveDialog(win, { title: 'Export passwords', defaultPath: 'Drift Passwords.csv' })
+  if (r.canceled || !r.filePath) return
+  if (await passwords.exportCsv(r.filePath)) toast('Exported — this file is NOT encrypted, delete it after use')
+}
+
+// ---------------------------------------------------------------- extensions UI
+function manageExtensions () {
+  const exts = allExtensions()
+  if (!exts.length) return toast('No extensions yet — run “Get Extensions”')
+  pick('Extensions', exts.map(e => ({ value: e.id, title: `${e.name} ${e.version || ''}` })), (id) => {
+    const e = exts.find(x => x.id === id)
+    setTimeout(() => pick(e.name, [
+      ...(e.manifest?.options_page || e.manifest?.options_ui ? [{ value: 'opt', title: 'Options' }] : []),
+      { value: 'rm', title: 'Remove Extension' }
+    ], (a) => {
+      if (a === 'opt') newTab(`chrome-extension://${id}/${e.manifest.options_page || e.manifest.options_ui.page}`)
+      if (a === 'rm') removeExtension(id)
+    }))
+  })
+}
+
+// ---------------------------------------------------------------- sync
+const { safeStorage } = require('electron')
+function syncKey () {
+  if (!S.sync.keyEnc) return null
+  try { return S.sync.keyEnc.startsWith('k:') ? safeStorage.decryptString(Buffer.from(S.sync.keyEnc.slice(2), 'base64')) : Buffer.from(S.sync.keyEnc.slice(2), 'base64').toString() } catch { return null }
+}
+async function setupSync () {
+  const icloud = path.join(os.homedir(), 'Library', 'Mobile Documents', 'com~apple~CloudDocs')
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Choose a sync folder (iCloud Drive, Dropbox, …) shared by your Macs',
+    defaultPath: fs.existsSync(icloud) ? icloud : os.homedir(),
+    properties: ['openDirectory', 'createDirectory']
+  })
+  if (r.canceled || !r.filePaths[0]) return
+  const folder = r.filePaths[0]
+  prompt('Sync passphrase — use the same one on every device (min 8 characters)', '', (pass) => {
+    if (!pass || pass.length < 8) return toast('Passphrase must be at least 8 characters')
+    S.sync.folder = folder
+    S.sync.deviceId = S.sync.deviceId || uid('dev')
+    S.sync.keyEnc = safeStorage.isEncryptionAvailable() ? 'k:' + safeStorage.encryptString(pass).toString('base64') : 'p:' + Buffer.from(pass).toString('base64')
+    S.sync.enabled = true
+    store.save(); runSync(true)
+  }, { secret: true })
+}
+function disableSync () { S.sync.enabled = false; S.sync.keyEnc = null; store.save(); toast('Sync turned off') }
+let syncing = false
+function runSync (manual = false) {
+  if (PRIVATE || syncing) return
+  if (!S.sync.enabled) { if (manual) toast('Sync is off — run “Set Up Sync…”'); return }
+  const pass = syncKey(); if (!pass) return manual && toast('Sync passphrase unavailable — set up sync again')
+  syncing = true
+  try {
+    const r = sync.syncNow({ S, passphrase: pass, passwords, newTabId: () => uid('t') })
+    store.save()
+    if (r.changed) { sanitizeState(); layout(); pushState() }
+    if (r.errors.length) toast('Sync problem: ' + r.errors[0])
+    else if (manual) toast(`Synced with ${r.devices} other device${r.devices === 1 ? '' : 's'}`)
+  } catch (e) { if (manual) toast('Sync failed: ' + e.message) } finally { syncing = false }
+}
+
+// ---------------------------------------------------------------- private window
+function openPrivateWindow () {
+  const flags = process.argv.slice(1).filter(a => /^--(no-sandbox|proxy-server|disable-gpu|ozone)/.test(a))
+  const args = app.isPackaged ? [...flags, '--drift-private'] : [...flags, app.getAppPath(), '--drift-private']
+  const env = { ...process.env }; delete env.DRIFT_SELFTEST
+  spawn(process.execPath, args, { detached: true, stdio: 'ignore', env }).unref()
+}
+
 function runCommand (id) { COMMANDS.find(c => c.id === id)?.run() }
 
 function renameSpace (id = S.activeSpaceId) {
@@ -869,7 +1068,11 @@ function pushState () {
     settings: { blocker: S.settings.blocker, httpsOnly: S.settings.httpsOnly },
     downloads: downloads.slice(0, 5),
     isMac,
-    fullscreen: win.isFullScreen()
+    fullscreen: win.isFullScreen(),
+    private: PRIVATE,
+    partition: partitionFor(sp.profileId),
+    extensions: PRIVATE ? 0 : allExtensions().length,
+    activeWcId: views.get(act)?.webContents.id || null
   })
 }
 function toast (msg) { win?.webContents.send('toast', msg) }
@@ -952,7 +1155,8 @@ function buildMenu () {
         { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: () => commandBar('new') },
         { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: () => commandBar('edit') },
         { label: 'Command Bar', accelerator: 'CmdOrCtrl+K', click: () => commandBar('new'), visible: false },
-        { label: 'New Space…', accelerator: 'CmdOrCtrl+Shift+N', click: () => runCommand('new-space') },
+        { label: 'New Private Window', accelerator: 'CmdOrCtrl+Shift+N', click: openPrivateWindow },
+        { label: 'New Space…', click: () => runCommand('new-space') },
         { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: reopenClosed },
         { type: 'separator' },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => { if (overlayOpen) return closeOverlay(); activeTabId() ? closeTab(activeTabId()) : null } },
@@ -964,7 +1168,10 @@ function buildMenu () {
       label: 'Edit',
       submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'pasteAndMatchStyle' }, { role: 'selectAll' }, { type: 'separator' },
         { label: 'Find…', accelerator: 'CmdOrCtrl+F', click: findInPage },
-        { label: 'Copy URL', accelerator: 'CmdOrCtrl+Shift+C', click: () => copyUrl() }]
+        { label: 'Copy URL', accelerator: 'CmdOrCtrl+Shift+C', click: () => copyUrl() },
+        { type: 'separator' },
+        { label: 'Passwords…', click: () => showPasswords() },
+        { label: 'Extensions…', click: () => manageExtensions() }]
     },
     {
       label: 'View',
@@ -1037,14 +1244,14 @@ function createWindow () {
     minWidth: 640,
     minHeight: 420,
     show: false,
-    title: 'Drift',
+    title: PRIVATE ? 'Drift — Private' : 'Drift',
     titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
     trafficLightPosition: { x: 16, y: 18 },
     vibrancy: isMac ? 'sidebar' : undefined,
     visualEffectState: 'followWindow',
     backgroundColor: isMac ? '#00000000' : (nativeTheme.shouldUseDarkColors ? '#1c1b22' : '#efeaf9'),
     icon: path.join(__dirname, '..', '..', 'build', 'icon.png'),
-    webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false }
+    webPreferences: { preload: fs.existsSync(MAIN_PRELOAD) ? MAIN_PRELOAD : PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false }
   })
   win.loadFile(path.join(UI_DIR, 'index.html'))
   win.webContents.on('will-navigate', e => e.preventDefault())
@@ -1091,8 +1298,19 @@ app.on('web-contents-created', (_e, contents) => {
 app.whenReady().then(() => {
   store = new Store(path.join(app.getPath('userData'), 'drift-state.json'), DEFAULTS)
   S = store.state
+  S.sync = { ...DEFAULTS.sync, ...(S.sync || {}) }
+  passwords = createPasswords({
+    file: path.join(app.getPath('userData'), 'drift-passwords.json'),
+    getWin: () => win,
+    isPrivate: PRIVATE,
+    isTab: (wc) => wcToTab.has(wc.id),
+    toast
+  })
+  if (!PRIVATE) {
+    try { require('electron-chrome-extensions').ElectronChromeExtensions.handleCRXProtocol(session.defaultSession) } catch {}
+  }
   sanitizeState()
-  if (!Object.keys(S.tabs).length && !S.history.length) {
+  if (!PRIVATE && !Object.keys(S.tabs).length && !S.history.length) {
     // first run: a couple of sensible favourites
     for (const u of ['https://www.google.com', 'https://www.youtube.com', 'https://github.com']) {
       const id = uid('t'); S.tabs[id] = { id, url: u, pinnedUrl: u, title: new URL(u).host, favicon: null, lastActiveAt: Date.now() }
@@ -1103,15 +1321,24 @@ app.whenReady().then(() => {
   createWindow()
   const cli = process.argv.slice(1).filter(a => /^https?:\/\//.test(a))
   for (const u of [...pendingOpenUrls, ...cli]) newTab(u)
+  if (!PRIVATE) {
+    for (const p of S.profiles) {
+      const ses = getSession(p.id)
+      for (const dir of S.unpackedExtensions || []) (ses.extensions || ses).loadExtension(dir).catch(() => {})
+    }
+    setTimeout(() => runSync(false), 3000)
+    setInterval(() => runSync(false), 2 * 60e3)
+  }
   setInterval(autoArchive, 60e3)
   autoArchive()
-  setTimeout(() => checkForUpdates(false), 10e3)
+  if (!PRIVATE) setTimeout(() => checkForUpdates(false), 10e3)
   setInterval(() => checkForUpdates(false), 4 * HOUR)
   app.on('activate', () => { if (!win) createWindow() })
 })
 
 app.on('window-all-closed', () => { if (!isMac) app.quit() })
-app.on('before-quit', () => store?.saveNow())
+app.on('before-quit', () => { if (!PRIVATE) { store?.saveNow(); runSync(false) } })
+app.on('will-quit', () => { if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })

@@ -74,3 +74,9 @@ body.collapsed #peek-edge{display:block}
 #toasts{position:fixed;left:10px;width:calc(var(--sw) - 18px);bottom:84px;display:flex;flex-direction:column;gap:6px;z-index:9;pointer-events:none}
 .toast{background:#211d2bee;color:#fff;padding:8px 14px;border-radius:9px;font-size:12.5px;animation:tin .2s}
 @keyframes tin{from{opacity:0;transform:translateY(6px)}}
+
+browser-action-list{display:flex;gap:2px;-webkit-app-region:no-drag}
+browser-action-list::part(action){width:26px;height:26px;border-radius:7px}
+browser-action-list::part(action):hover{background:var(--hover)}
+body.private{--space:#55525e;--fg:#ece9f5;--muted:#ece9f599;--hover:#ffffff14;--active:#ffffff26;--bg:linear-gradient(165deg,#2b2930,#1b1a1f);color-scheme:dark}
+body.private #space-name::after{content:"Private · nothing is saved";font-weight:400;opacity:.7}

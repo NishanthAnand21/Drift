@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src https: data:; font-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src https: data: crx:; font-src 'self'">
 <title>Drift</title>
 <link rel="stylesheet" href="ui.css">
 </head>
@@ -12,6 +12,7 @@
     <div class="lights"></div>
     <button class="ib" id="b-sidebar" title="Toggle sidebar (⌘S)">◧</button>
     <span class="flex"></span>
+    <browser-action-list id="exts" alignment="bottom right"></browser-action-list>
     <button class="ib" id="b-back" title="Back (⌘[)">←</button>
     <button class="ib" id="b-fwd" title="Forward (⌘])">→</button>
     <button class="ib" id="b-reload" title="Reload (⌘R)">↻</button>
