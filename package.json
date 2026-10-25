@@ -1,0 +1,46 @@
+{
+  "name": "drift-browser",
+  "productName": "Drift",
+  "version": "1.0.0",
+  "description": "Drift — a calm, sidebar-first Chromium browser for macOS",
+  "main": "src/main/main.js",
+  "author": "Drift",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "icon": "electron scripts/make-icon.js",
+    "build": "electron-builder --mac",
+    "build:dir": "electron-builder --dir",
+    "release": "electron-builder --mac --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "6.6.2"
+  },
+  "devDependencies": {
+    "electron": "38.2.0",
+    "electron-builder": "26.0.12"
+  },
+  "build": {
+    "appId": "app.drift.browser",
+    "productName": "Drift",
+    "files": ["src/**/*", "package.json"],
+    "directories": { "buildResources": "build", "output": "dist" },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }, { "target": "zip", "arch": ["arm64", "x64"] }],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSCameraUsageDescription": "Websites you allow can use your camera.",
+        "NSMicrophoneUsageDescription": "Websites you allow can use your microphone.",
+        "NSLocationUsageDescription": "Websites you allow can use your location."
+      }
+    },
+    "protocols": [{ "name": "Web URL", "schemes": ["http", "https"] }],
+    "linux": { "target": "AppImage", "icon": "build/icon.png" },
+    "publish": [{ "provider": "github", "owner": "YOUR_GITHUB_USER", "repo": "drift-browser" }]
+  }
+}

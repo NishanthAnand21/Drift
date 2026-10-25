@@ -1,0 +1,8 @@
+# Keeps Electron (and therefore Chromium) current with security releases.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      electron: { patterns: ["electron", "electron-builder", "electron-updater"] }

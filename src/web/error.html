@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-n6rDTHQWA9O00jx2hTxP14MfRKFgbzWYUlm2URLXfs0='">
+<title>Can't open this page</title>
+<style>
+body{font:15px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;background:#faf9fc;color:#2a2733}
+@media (prefers-color-scheme:dark){body{background:#1c1b22;color:#e8e6ef}}
+.box{max-width:460px;text-align:center}h1{font-size:22px;margin:0 0 8px}p{opacity:.7;word-break:break-all}
+a.btn{display:inline-block;margin-top:14px;padding:8px 16px;border-radius:8px;background:#7c5cff;color:#fff;text-decoration:none}
+code{opacity:.5;font-size:12px}
+</style></head><body><div class="box"><h1 id="h"></h1><p id="p"></p><code id="c"></code><div id="a"></div></div>
+<script>
+const q=new URLSearchParams(location.search),k=q.get('kind'),u=q.get('url')||''
+const set=(id,t)=>document.getElementById(id).textContent=t
+document.title=u
+if(k==='https'){set('h','This site doesn’t support a secure connection');set('p','HTTPS-Only Mode couldn’t upgrade '+u.replace(/^http:/,'https:')+'. Data you send over HTTP can be seen by others.')
+ const a=document.createElement('a');a.className='btn';a.textContent='Continue to HTTP site';a.href=u;document.getElementById('a').append(a)}
+else if(k==='crash'){set('h','This page crashed');set('p',u);const a=document.createElement('a');a.className='btn';a.textContent='Reload';a.href=u;document.getElementById('a').append(a)}
+else{set('h','Can’t open this page');set('p',u)}
+set('c',(q.get('desc')||'')+' '+(q.get('code')||''))
+</script></body></html>

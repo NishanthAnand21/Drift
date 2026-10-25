@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src https: data:; font-src 'self'">
+<title>Drift</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<aside id="sidebar">
+  <div class="top drag">
+    <div class="lights"></div>
+    <button class="ib" id="b-sidebar" title="Toggle sidebar (⌘S)">◧</button>
+    <span class="flex"></span>
+    <button class="ib" id="b-back" title="Back (⌘[)">←</button>
+    <button class="ib" id="b-fwd" title="Forward (⌘])">→</button>
+    <button class="ib" id="b-reload" title="Reload (⌘R)">↻</button>
+  </div>
+  <div id="urlbar" title="Edit URL (⌘L)"><span id="shield" title="Trackers blocked on this page"></span><span id="url-text"></span></div>
+  <div id="favorites" class="dropzone" data-zone="favorite"></div>
+  <div id="scroll">
+    <div id="space-name"></div>
+    <div id="pinned" class="dropzone list" data-zone="pinned"></div>
+    <div class="divider"><span></span><button id="b-clear" title="Archive all unpinned tabs">↓ Clear</button></div>
+    <button id="b-newtab" class="row newtab">＋ New Tab</button>
+    <div id="today" class="dropzone list" data-zone="today"></div>
+  </div>
+  <div id="downloads"></div>
+  <div class="bottom">
+    <button class="ib" id="b-archive" title="Archived tabs (⌘⇧A)">⌂</button>
+    <div id="spaces"></div>
+    <button class="ib" id="b-newspace" title="New space">＋</button>
+  </div>
+</aside>
+<div id="resizer"></div>
+<main id="content"><div id="empty"><div class="logo"></div><p>Press <kbd>⌘T</kbd> to open something new</p></div></main>
+<div id="peek-edge"></div>
+<div id="toasts"></div>
+<script src="ui.js"></script>
+</body>
+</html>
