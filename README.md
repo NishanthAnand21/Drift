@@ -149,3 +149,7 @@ src/web/error.html    error / HTTPS-Only / crash page
 `DRIFT_SELFTEST=/some/dir npm start -- --no-sandbox` runs a scripted end-to-end test. It loads
 real sites and checks pinning, favourites, split view, the command bar, spaces, profiles and
 auto-archive. It writes `results.txt` and screenshots to that directory (Linux, under `xvfb-run`).
+
+## Author
+
+Created by **Nishanth Anand** ([@NishanthAnand21](https://github.com/NishanthAnand21)), with **Claude** (Anthropic) as co-author.

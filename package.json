@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Drift \u2014 a calm, sidebar-first Chromium browser for macOS",
   "main": "src/main/main.js",
-  "author": "Drift",
+  "author": "Nishanth Anand",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
@@ -102,7 +102,8 @@
       "onlyLoadAppFromAsar": true,
       "loadBrowserProcessSpecificV8Snapshot": false,
       "grantFileProtocolExtraPrivileges": false
-    }
+    },
+    "copyright": "Copyright \u00a9 2026 Nishanth Anand"
   },
   "overrides": {
     "adm-zip": "0.6.1"
