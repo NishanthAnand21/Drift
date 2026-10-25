@@ -130,7 +130,7 @@ The **Library** (▤ at the bottom of the sidebar) lists media that's playing, d
 
 ## Updates
 
-- **App updates:** packaged builds check GitHub Releases at launch and every 4 h (`electron-updater`), download in the background, and offer to restart. Set `build.publish.owner/repo` in `package.json` to your repository, then push a `v*` tag; `.github/workflows/release.yml` builds and publishes. macOS only applies auto-updates to signed builds.
+- **App updates:** packaged builds check GitHub Releases at launch and every 4 h (`electron-updater`), download in the background, and offer to restart. To publish a release, push a `v*` tag, or push to the `release` branch (the workflow then creates the `v<version>` tag from `package.json`). `.github/workflows/release.yml` builds on a macOS runner, verifies the signatures and fuses, and only then publishes the DMG and ZIP files. macOS only applies auto-updates to signed builds.
 - **Chromium security updates** arrive with new Electron releases. `.github/dependabot.yml` opens a PR each week, so bump the Electron version, then tag a release.
 
 ## Project layout
