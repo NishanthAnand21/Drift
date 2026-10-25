@@ -54,4 +54,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml --title "Drift $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+        run: |
+          FILES="dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # release was created on github.com (which also created the tag): attach the verified builds
+            gh release upload "$GITHUB_REF_NAME" $FILES --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" $FILES --title "Drift $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          fi
