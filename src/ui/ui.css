@@ -82,3 +82,12 @@ browser-action-list::part(action){width:26px;height:26px;border-radius:7px}
 browser-action-list::part(action):hover{background:var(--hover)}
 body.private{--space:#55525e;--fg:#ece9f5;--muted:#ece9f599;--hover:#ffffff14;--active:#ffffff26;--bg:linear-gradient(165deg,#2b2930,#1b1a1f);color-scheme:dark}
 body.private #space-name::after{content:"Private · nothing is saved";font-weight:400;opacity:.7}
+
+#panes{position:fixed;inset:0;pointer-events:none;z-index:1}
+.pane-ring{position:fixed;border-radius:12px;border:2px solid transparent}
+.pane-ring.active{border-color:color-mix(in srgb,var(--space) 75%,#fff)}
+.divider-h{position:fixed;pointer-events:auto;cursor:col-resize}
+.divider-h.col{cursor:row-resize}
+.divider-h::after{content:"";position:absolute;left:50%;top:50%;width:4px;height:36px;margin:-18px 0 0 -2px;border-radius:2px;background:var(--muted);opacity:.5}
+.divider-h.col::after{width:36px;height:4px;margin:-2px 0 0 -18px}
+.divider-h:hover::after{opacity:1}

@@ -71,7 +71,13 @@ function grow () { q.style.height = 'auto'; q.style.height = Math.min(160, q.scr
 api.on('chat', (type, data) => {
   if (type === 'init') {
     const sel = $('#model'); sel.replaceChildren(...data.models.map(([id, name]) => { const o = document.createElement('option'); o.value = id; o.textContent = name.replace('Claude ', ''); o.selected = id === data.model; return o }))
-    $('#keyhint').textContent = data.hasKey ? '' : 'Add your Claude API key in Settings → Integrations (or set ANTHROPIC_API_KEY).'
+    const hint = $('#keyhint'); hint.replaceChildren()
+    if (!data.hasKey) {
+      hint.append('No API key set. ')
+      const a = document.createElement('a'); a.href = '#'; a.textContent = 'Use your Claude account (Pro, Max, Team) instead'
+      a.onclick = (e) => { e.preventDefault(); api.send('chat-mode', 'account') }
+      hint.append(a, ', or add a key in Settings → Integrations.')
+    }
     $('#pagename').textContent = data.pageTitle || ''
   }
   if (type === 'page') $('#pagename').textContent = data || ''
@@ -89,6 +95,7 @@ q.addEventListener('input', grow)
 q.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit() } if (e.key === 'Escape') api.send('chat-close') })
 sendBtn.onclick = submit
 $('#new').onclick = () => api.send('chat-reset')
+$('#menu').onclick = () => api.send('chat-menu')
 $('#close').onclick = () => api.send('chat-close')
 $('#model').onchange = (e) => api.send('chat-model', e.target.value)
 api.send('chat-ready')

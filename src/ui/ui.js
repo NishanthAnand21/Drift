@@ -18,7 +18,7 @@ function ph (t) { const d = document.createElement('span'); d.className = 'ph'; 
 function tabRow (t, zone) {
   const el = document.createElement('div')
   el.className = 'row' + (t.id === S.activeTabId ? ' active' : '') + (t.loaded ? '' : ' unloaded') + (t.loading ? ' loading' : '') +
-    (S.split && (S.split.a === t.id || S.split.b === t.id) ? ' split' : '')
+    (S.split && S.split.ids.includes(t.id) ? ' split' : '')
   el.draggable = true; el.dataset.id = t.id; el.dataset.zone = zone
   el.title = `${t.title}\n${t.url}`
   el.append(icon(t))
@@ -125,6 +125,27 @@ function render () {
     return el
   }))
 }
+
+// Split view: outline the focused pane and put draggable dividers in the gaps between panes
+api.on('layout', ({ panes, dir }) => {
+  const box = $('#panes'); box.replaceChildren()
+  if (!panes) return
+  const px = (n) => n + 'px'
+  panes.forEach((p, i) => {
+    const ring = document.createElement('div'); ring.className = 'pane-ring' + (p.active ? ' active' : '')
+    Object.assign(ring.style, { left: px(p.x - 2), top: px(p.y - 2), width: px(p.width + 4), height: px(p.height + 4) })
+    box.append(ring)
+    if (i === panes.length - 1) return
+    const d = document.createElement('div'); d.className = 'divider-h ' + dir
+    const n = panes[i + 1]
+    if (dir === 'col') Object.assign(d.style, { left: px(p.x), width: px(p.width), top: px(p.y + p.height), height: px(n.y - p.y - p.height) })
+    else Object.assign(d.style, { left: px(p.x + p.width), width: px(n.x - p.x - p.width), top: px(p.y), height: px(p.height) })
+    d.title = 'Drag to resize · double-click to make equal'
+    d.onmousedown = (e) => { e.preventDefault(); api.send('split-drag-start', i) }
+    d.ondblclick = () => api.send('split-equalize')
+    box.append(d)
+  })
+})
 
 api.on('state', (s) => { S = s; render() })
 api.on('toast', (msg) => {

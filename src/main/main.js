@@ -82,9 +82,11 @@ const DEFAULTS = {
     peekShift: true,
     peekFromPinned: true,
     pipOnLeave: true,
+    pipOnAppSwitch: true,
     boostsEnabled: true,
     icon: 'aurora',
     mcpEnabled: false,
+    claudeMode: 'account',
     claudeModel: 'claude-opus-5-5',
     claudeEffort: 'medium',
     mcpReadPages: false
@@ -123,6 +125,9 @@ const space = (id = S.activeSpaceId) => S.spaces.find(s => s.id === id)
 const profile = (id) => S.profiles.find(p => p.id === id)
 const activeTabId = () => space()?.activeTabId || null
 const tab = (id) => S.tabs[id]
+// Split view: up to 4 tabs side by side ('row') or stacked ('col'); sizes are fractions summing to 1
+const MAX_SPLIT = 4
+const inSplit = (sp, id) => !!sp?.split && sp.split.ids.includes(id)
 
 function locate (tabId) {
   for (const sp of S.spaces) {
@@ -191,7 +196,7 @@ async function askPermission (wc, permission, origin, details) {
   return allow
 }
 
-function setupSession (ses) {
+function setupSession (ses, { extensions = true } = {}) {
   if (configuredSessions.has(ses)) return
   configuredSessions.add(ses)
   ses.setUserAgent(CHROME_UA())
@@ -279,7 +284,7 @@ function setupSession (ses) {
     })
   })
   ses.setSpellCheckerEnabled(true)
-  if (!PRIVATE) setupExtensions(ses)
+  if (!PRIVATE && extensions) setupExtensions(ses)
 }
 
 function applyProxy (ses) {
@@ -486,7 +491,7 @@ function wireWebContents (tabId, wc) {
   wc.on('media-paused', () => { if (st()) { st().audible = false; pushStateSoon() } })
   wc.on('focus', () => {
     const sp = space()
-    if (sp.split && (sp.split.a === tabId || sp.split.b === tabId) && sp.activeTabId !== tabId) {
+    if (inSplit(sp, tabId) && sp.activeTabId !== tabId) {
       sp.activeTabId = tabId; pushStateSoon()
     }
   })
@@ -573,6 +578,7 @@ function pageContextMenu (tabId, wc, p) {
     items.push(
       { label: 'Open Link in New Tab', click: () => newTab(p.linkURL, { activate: false }) },
       { label: 'Open Link in Split View', click: () => openSplit(p.linkURL) },
+      { label: 'Open Link in Peek', click: () => openPeek(p.linkURL) },
       { label: 'Copy Link', click: () => clipboard.writeText(p.linkURL) },
       { type: 'separator' })
   }
@@ -620,13 +626,10 @@ function activateTab (tabId) {
   const loc = locate(tabId)
   if (loc?.space && loc.space.id !== S.activeSpaceId) S.activeSpaceId = loc.space.id
   const sp = space()
-  if (sp.split && sp.split.a !== tabId && sp.split.b !== tabId && sp.activeTabId && (sp.activeTabId === sp.split.a || sp.activeTabId === sp.split.b)) {
-    // leaving a split keeps it intact; it reappears when either side is activated
-  }
   const prev = sp.activeTabId
-  if (S.settings.pipOnLeave && prev && prev !== tabId && views.has(prev) && live.get(prev)?.audible && !(sp.split && [sp.split.a, sp.split.b].includes(prev) && [sp.split.a, sp.split.b].includes(tabId))) {
-    views.get(prev).webContents.executeJavaScript(`(() => { const v = [...document.querySelectorAll('video')].find(v => !v.paused && v.readyState > 2); if (v && !document.pictureInPictureElement && !v.disablePictureInPicture) v.requestPictureInPicture().catch(() => {}) })()`, true).catch(() => {})
-  }
+  if (S.settings.pipOnLeave && prev && prev !== tabId && views.has(prev) && !(inSplit(sp, prev) && inSplit(sp, tabId))) popOutVideo(prev, { auto: true })
+  if (pip?.auto && pip.tabId === tabId) returnVideo(tabId)
+
   sp.activeTabId = tabId
   tab(tabId).lastActiveAt = Date.now()
   ensureView(tabId)
@@ -643,10 +646,9 @@ function closeTab (tabId, { archive = true } = {}) {
   if (!t) return
   const loc = locate(tabId)
   const sp = loc?.space || space()
-  if (sp.split && (sp.split.a === tabId || sp.split.b === tabId)) {
-    const other = sp.split.a === tabId ? sp.split.b : sp.split.a
-    sp.split = null
-    if (sp.activeTabId === tabId) sp.activeTabId = other
+  if (inSplit(sp, tabId)) {
+    const rest = removeFromSplit(sp, tabId)
+    if (sp.activeTabId === tabId && rest) sp.activeTabId = rest
   }
   if (loc && loc.type !== 'today') {
     // Pinned & favourite tabs are never closed – just unloaded (and reset)
@@ -685,7 +687,7 @@ function memorySaver () {
   const visible = new Set(win ? win.contentView.children : [])
   for (const [id, v] of [...views]) {
     const t = tab(id); const l = live.get(id)
-    if (!t || visible.has(v) || l?.audible || now - (t.lastActiveAt || 0) < limit) continue
+    if (!t || visible.has(v) || l?.audible || pip?.tabId === id || now - (t.lastActiveAt || 0) < limit) continue
     if (v.webContents.isCurrentlyAudible?.() || v.webContents.isDevToolsOpened()) continue
     destroyView(id)
   }
@@ -702,7 +704,7 @@ function autoArchive () {
     for (const id of [...sp.today]) {
       const t = tab(id)
       if (!t || id === sp.activeTabId) continue
-      if (sp.split && (sp.split.a === id || sp.split.b === id)) continue
+      if (inSplit(sp, id) || pip?.tabId === id) continue
       if (live.get(id)?.audible) continue
       if (now - (t.lastActiveAt || 0) > limit) {
         sp.today.splice(sp.today.indexOf(id), 1)
@@ -719,7 +721,7 @@ function autoArchive () {
 function clearToday () {
   const sp = space()
   for (const id of [...sp.today]) {
-    if (sp.split && (sp.split.a === id || sp.split.b === id)) continue
+    if (inSplit(sp, id)) continue
     const t = tab(id); sp.today.splice(sp.today.indexOf(id), 1); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]
   }
   if (!tab(sp.activeTabId) || !locate(sp.activeTabId)) sp.activeTabId = pickNeighbor(sp, null)
@@ -744,7 +746,7 @@ function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId } = {}) {
   if (to !== 'today' && loc.type === 'today' && S.settings.tidyTitles && !t.customTitle) t.customTitle = tidyTitle(t.title, t.url)
   if (to === 'today') delete t.customTitle
   if (loc.space && loc.space.id !== sp.id && loc.space.activeTabId === tabId) loc.space.activeTabId = pickNeighbor(loc.space, tabId)
-  if (loc.space?.split && (loc.space.split.a === tabId || loc.space.split.b === tabId) && loc.space.id !== sp.id) loc.space.split = null
+  if (inSplit(loc.space, tabId) && loc.space.id !== sp.id) removeFromSplit(loc.space, tabId)
   // crossing profiles requires a fresh view in the new session
   if (oldProfile !== sp.profileId && views.has(tabId)) { destroyView(tabId); if (sp.activeTabId === tabId || S.activeSpaceId === sp.id) ensureView(tabId) }
   store.save(); layout(); pushState()
@@ -783,17 +785,35 @@ function openSplit (urlOrTabId) {
   const sp = space()
   const base = sp.activeTabId
   if (!base) { if (typeof urlOrTabId === 'string' && !tab(urlOrTabId)) newTab(urlOrTabId); return }
+  if (sp.split && !inSplit(sp, base)) sp.split = null // starting a new split from a tab outside the old one
+  if (sp.split && sp.split.ids.length >= MAX_SPLIT) return toast(`Split view holds up to ${MAX_SPLIT} tabs`)
   let other = tab(urlOrTabId) ? urlOrTabId : null
+  if (other && inSplit(sp, other)) return activateTab(other)
   if (!other) {
     other = uid('t')
     S.tabs[other] = { id: other, url: urlOrTabId, title: urlOrTabId, favicon: null, createdAt: Date.now(), lastActiveAt: Date.now() }
     sp.today.splice(Math.max(0, sp.today.indexOf(base) + 1), 0, other)
   }
   if (other === base) return
-  sp.split = { a: base, b: other, ratio: 0.5 }
+  const ids = sp.split ? [...sp.split.ids] : [base]
+  ids.splice(ids.indexOf(base) + 1, 0, other)
+  sp.split = { ids, dir: sp.split?.dir || 'row', sizes: ids.map(() => 1 / ids.length) }
   activateTab(other)
 }
-
+// Remove one tab from its space's split (the tab stays open). Returns a tab to focus, or null.
+function removeFromSplit (sp, tabId) {
+  if (!inSplit(sp, tabId)) return null
+  const i = sp.split.ids.indexOf(tabId)
+  const ids = sp.split.ids.filter(id => id !== tabId)
+  if (ids.length < 2) { sp.split = null; return ids[0] || null }
+  const sizes = sp.split.sizes.filter((_, k) => k !== i); const sum = sizes.reduce((a, b) => a + b, 0)
+  sp.split = { ...sp.split, ids, sizes: sizes.map(x => x / sum) }
+  return ids[Math.min(i, ids.length - 1)]
+}
+function setSplitDir (dir) {
+  const sp = space(); if (!sp.split) return toast('No split view in this space')
+  sp.split.dir = dir; layout(); store.save()
+}
 function unsplit () {
   const sp = space(); if (!sp.split) return
   sp.split = null; layout(); pushState(); store.save()
@@ -855,8 +875,8 @@ function layout () {
   const sp = space()
   const needed = []
   const act = sp.activeTabId && tab(sp.activeTabId) ? sp.activeTabId : null
-  const splitActive = sp.split && act && (sp.split.a === act || sp.split.b === act) && tab(sp.split.a) && tab(sp.split.b)
-  if (splitActive) needed.push(sp.split.a, sp.split.b)
+  const splitActive = inSplit(sp, act) && sp.split.ids.every(id => tab(id))
+  if (splitActive) needed.push(...sp.split.ids)
   else if (act) needed.push(act)
   if (htmlFullscreen && views.has(htmlFullscreen)) needed.splice(0, needed.length, htmlFullscreen)
 
@@ -865,22 +885,70 @@ function layout () {
   const x0 = sw || PAD
   const chatW = chatOpen && !htmlFullscreen ? CHAT_W + 6 : 0
   const area = { x: x0, y: PAD, width: Math.max(100, w - x0 - PAD - chatW), height: Math.max(100, h - PAD * 2) }
-  if (chatOpen && chatView && !htmlFullscreen) { win.contentView.addChildView(chatView); chatView.setBounds({ x: w - PAD - CHAT_W, y: PAD, width: CHAT_W, height: h - PAD * 2 }) }
+  if (chatOpen && !htmlFullscreen) {
+    const px = w - PAD - CHAT_W
+    if (accountMode() && claudeBar && claudeWeb) {
+      win.contentView.addChildView(claudeBar); claudeBar.setBounds({ x: px, y: PAD, width: CHAT_W, height: 40 })
+      win.contentView.addChildView(claudeWeb); claudeWeb.setBounds({ x: px, y: PAD + 44, width: CHAT_W, height: h - PAD * 2 - 44 })
+    } else if (chatView) { win.contentView.addChildView(chatView); chatView.setBounds({ x: px, y: PAD, width: CHAT_W, height: h - PAD * 2 }) }
+  }
+  const rects = needed.length > 1 ? splitRects(area, sp.split) : [area]
   needed.forEach((id, i) => {
     const v = ensureView(id)
     win.contentView.addChildView(v)
     if (htmlFullscreen) { v.setBounds({ x: 0, y: 0, width: w, height: h }); v.setBorderRadius?.(0); return }
     v.setBorderRadius?.(10)
-    if (needed.length === 2) {
-      const gap = 6; const lw = Math.round((area.width - gap) * sp.split.ratio)
-      v.setBounds(i === 0 ? { ...area, width: lw } : { ...area, x: area.x + lw + gap, width: area.width - lw - gap })
-    } else v.setBounds(area)
+    v.setBounds(rects[i])
   })
-  if (overlayOpen) { win.contentView.addChildView(overlay); overlay.setBounds(overlayBounds()); if (peekView && overlayOpen.mode === 'peek') win.contentView.addChildView(peekView) }
-  win.webContents.send('layout', { area, splitIds: needed.length === 2 ? needed : null })
+  lastLayout = { area, rects, dir: sp.split?.dir || 'row' }
+  win.webContents.send('layout', { area, panes: needed.length > 1 && !htmlFullscreen ? needed.map((id, i) => ({ id, ...rects[i], active: id === act })) : null, dir: sp.split?.dir || 'row' })
 }
 
 // ---------------------------------------------------------------- overlay (command bar, find, prompts)
+let lastLayout = null
+const SPLIT_GAP = 6
+function splitRects (area, split) {
+  const n = split.ids.length; const row = split.dir !== 'col'
+  const total = (row ? area.width : area.height) - SPLIT_GAP * (n - 1)
+  const rects = []; let off = 0
+  split.sizes.forEach((f, i) => {
+    const len = i === n - 1 ? total - off : Math.round(total * f)
+    rects.push(row ? { x: area.x + off + i * SPLIT_GAP, y: area.y, width: len, height: area.height } : { x: area.x, y: area.y + off + i * SPLIT_GAP, width: area.width, height: len })
+    off += len
+  })
+  return rects
+}
+// Divider dragging: a transparent full-window shield captures the mouse while you drag
+let dragShield = null; let dragIndex = -1
+function startSplitDrag (index) {
+  const sp = space(); if (!sp.split || index < 0 || index >= sp.split.ids.length - 1) return
+  dragIndex = index
+  if (!dragShield) {
+    dragShield = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    dragShield.setBackgroundColor('#00000000')
+    dragShield.webContents.on('will-navigate', e => e.preventDefault())
+  }
+  dragShield.webContents.loadFile(path.join(UI_DIR, 'drag-shield.html'), { query: { dir: sp.split.dir } })
+  const [w, h] = win.getContentSize()
+  win.contentView.addChildView(dragShield); dragShield.setBounds({ x: 0, y: 0, width: w, height: h })
+}
+function splitDrag (x, y) {
+  const sp = space(); if (!sp.split || dragIndex < 0 || !lastLayout) return
+  const { area } = lastLayout; const row = sp.split.dir !== 'col'
+  const p = row ? (x - area.x) / area.width : (y - area.y) / area.height
+  const sizes = sp.split.sizes; const i = dragIndex
+  const before = sizes.slice(0, i).reduce((a, b) => a + b, 0); const pair = sizes[i] + sizes[i + 1]
+  const MIN = 0.1
+  const at = Math.max(before + MIN, Math.min(before + pair - MIN, p))
+  sizes[i] = at - before; sizes[i + 1] = pair - sizes[i]
+  layout()
+}
+function endSplitDrag () {
+  dragIndex = -1
+  if (dragShield) { try { win.contentView.removeChildView(dragShield) } catch {} }
+  store.save()
+}
+
 function overlayBounds () {
   const [w, h] = win.getContentSize()
   if (overlayOpen?.mode === 'find') return { x: w - 380, y: 14, width: 360, height: 64 }
@@ -962,6 +1030,10 @@ const COMMANDS = [
   { id: 'new-tab', title: 'New Tab', keys: '⌘T', run: () => commandBar('new') },
   { id: 'split', title: 'Add Split View', keys: '⌃⇧=', run: () => setTimeout(() => openOverlay({ mode: 'split', query: '' })) },
   { id: 'unsplit', title: 'Separate Split View', keys: '⌃⇧-', run: unsplit },
+  { id: 'split-row', title: 'Split View: Side by Side', run: () => setSplitDir('row') },
+  { id: 'split-col', title: 'Split View: Stacked', run: () => setSplitDir('col') },
+  { id: 'split-remove', title: 'Remove Tab from Split View', run: () => { const sp = space(); const id = sp.activeTabId; if (!inSplit(sp, id)) return; removeFromSplit(sp, id); layout(); pushState(); store.save() } },
+  { id: 'pip', title: 'Pop Out Video (floating window)', keys: '⌥⌘P', run: () => popOutVideo(activeTabId()).then(ok => { if (!ok) toast('No playing video on this page') }) },
   { id: 'pin', title: 'Pin / Unpin Tab', keys: '⌘D', run: () => togglePin() },
   { id: 'fav', title: 'Add to / Remove from Favorites', run: () => toggleFavorite() },
   { id: 'copy-url', title: 'Copy URL', keys: '⌘⇧C', run: () => copyUrl() },
@@ -1128,6 +1200,33 @@ function openPrivateWindow () {
   spawn(process.execPath, args, { detached: true, stdio: 'ignore', env }).unref()
 }
 
+// ---------------------------------------------------------------- Picture-in-Picture (floating video)
+// Uses Chromium's native PiP window: movable, resizable, and on macOS it floats above every app.
+let pip = null // { tabId, auto } — auto: Drift popped it out and will bring it back
+const PIP_IN = `(async () => {
+  const vids = [...document.querySelectorAll('video')].filter(v => !v.paused && !v.ended && v.readyState > 2 && !v.disablePictureInPicture)
+  if (!vids.length) return false
+  const v = vids.sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0]
+  if (document.pictureInPictureElement === v) return true
+  try { await v.requestPictureInPicture(); return true } catch { return false }
+})()`
+const PIP_OUT = `(async () => { if (!document.pictureInPictureElement) return false; await document.exitPictureInPicture().catch(() => {}); return true })()`
+async function inFrames (wc, code) {
+  for (const f of wc.mainFrame.framesInSubtree) { try { if (await f.executeJavaScript(code, true)) return true } catch {} }
+  return false
+}
+async function popOutVideo (tabId, { auto = false } = {}) {
+  const v = views.get(tabId); if (!v || v.webContents.isDestroyed()) return false
+  const ok = await inFrames(v.webContents, PIP_IN)
+  if (ok) pip = { tabId, auto }
+  return ok
+}
+async function returnVideo (tabId) {
+  const v = views.get(tabId)
+  if (v && !v.webContents.isDestroyed()) await inFrames(v.webContents, PIP_OUT)
+  if (pip?.tabId === tabId) pip = null
+}
+
 // ---------------------------------------------------------------- Peek
 let peekView = null
 function peekBounds () {
@@ -1229,12 +1328,123 @@ function ensureChatView () {
 function chatInit () {
   return { models: CLAUDE_MODELS, model: S.settings.claudeModel, hasKey: !!claudeKey() || !!process.env.ANTHROPIC_API_KEY, pageTitle: tab(activeTabId())?.title || '' }
 }
+const accountMode = () => S.settings.claudeMode !== 'api'
+function detachChatViews () {
+  for (const v of [chatView, claudeBar, claudeWeb]) if (v) { try { win.contentView.removeChildView(v) } catch {} }
+}
 function toggleChat (force) {
   chatOpen = typeof force === 'boolean' ? force : !chatOpen
-  if (chatOpen) ensureChatView()
-  else if (chatView) { try { win.contentView.removeChildView(chatView) } catch {} }
+  detachChatViews()
+  if (chatOpen) { if (accountMode()) ensureClaudeAccountViews(); else ensureChatView() }
   layout(); pushState()
-  if (chatOpen) chatView.webContents.send('chat', 'focus'); else views.get(activeTabId())?.webContents.focus()
+  if (!chatOpen) return views.get(activeTabId())?.webContents.focus()
+  if (accountMode()) claudeWeb.webContents.focus(); else chatView.webContents.send('chat', 'focus')
+}
+function setClaudeMode (mode) {
+  if (!['account', 'api'].includes(mode)) return
+  S.settings.claudeMode = mode; store.save(); sendSettings()
+  if (chatOpen) toggleChat(true)
+}
+
+// ---- Claude account mode: the official claude.ai, signed in with your Pro / Max / Team plan.
+// Runs in its own isolated, sandboxed session; Drift never sees your Claude credentials.
+let claudeBar = null
+let claudeWeb = null
+const CLAUDE_HOME = 'https://claude.ai/new'
+const claudeSession = () => session.fromPartition(PRIVATE ? 'claude-account' : 'persist:claude-account')
+function ensureClaudeAccountViews () {
+  if (!claudeBar) {
+    claudeBar = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    claudeBar.setBorderRadius?.(10)
+    claudeBar.webContents.loadFile(path.join(UI_DIR, 'claude-bar.html'))
+    claudeBar.webContents.on('will-navigate', e => e.preventDefault())
+    claudeBar.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  }
+  if (!claudeWeb) {
+    const ses = claudeSession()
+    setupSession(ses, { extensions: false })
+    claudeWeb = new WebContentsView({ webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false, safeDialogs: true, spellcheck: true, preload: WEB_PRELOAD } })
+    claudeWeb.setBorderRadius?.(10)
+    claudeWeb.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#262624' : '#faf9f5')
+    const wc = claudeWeb.webContents
+    // Sign-in popups (Google, Apple, company SSO) stay attached to the panel; other links open as Drift tabs.
+    wc.setWindowOpenHandler(({ url, disposition, features }) => {
+      if (!isSafeWebUrl(url)) return { action: 'deny' }
+      if (disposition === 'new-window' && features) {
+        return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, parent: win, autoHideMenuBar: true, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, safeDialogs: true } } }
+      }
+      newTab(url); return { action: 'deny' }
+    })
+    wc.on('will-navigate', (e) => guardNavigation(e, e.url, wc))
+    wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
+      if (isMain && code !== -3) wc.loadFile(ERROR_PAGE, { query: { kind: 'error', url, code: String(code), desc } })
+    })
+    wc.on('context-menu', (_e, p) => {
+      const items = []
+      if (p.linkURL) items.push({ label: 'Open Link in New Tab', click: () => newTab(p.linkURL) }, { label: 'Copy Link', click: () => clipboard.writeText(p.linkURL) }, { type: 'separator' })
+      if (p.isEditable) items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' })
+      else if (p.selectionText) items.push({ role: 'copy' })
+      items.push({ type: 'separator' }, { label: 'Reload', click: () => wc.reload() })
+      Menu.buildFromTemplate(items).popup({ window: win })
+    })
+    wc.loadURL(CLAUDE_HOME).catch(() => {})
+  }
+}
+// Focus Claude's message box (re-trying while the claude.ai app starts up), type text into it,
+// and confirm it actually landed there. Returns false when there is no message box (e.g. signed out).
+async function typeIntoClaude (text) {
+  const wc = claudeWeb.webContents
+  const focusComposer = `(() => {
+    const e = document.querySelector('div.ProseMirror[contenteditable="true"], [data-testid="chat-input"] [contenteditable="true"], div[contenteditable="true"][role="textbox"], div[contenteditable="true"]')
+    if (!e || !e.offsetParent) return false
+    e.focus(); return document.activeElement === e || e.contains(document.activeElement)
+  })()`
+  const marker = text.slice(0, 40)
+  const landed = `(() => { const e = document.activeElement; return !!e && (e.innerText || e.value || '').includes(${JSON.stringify(marker)}) })()`
+  for (let i = 0; i < 20; i++) {
+    if (!wc.isLoading() && await wc.executeJavaScript(focusComposer, true).catch(() => false)) {
+      wc.focus(); wc.insertText(text)
+      await new Promise(r => setTimeout(r, 150))
+      return await wc.executeJavaScript(landed).catch(() => false)
+    }
+    await new Promise(r => setTimeout(r, 300))
+  }
+  return false
+}
+const MAX_SHARED_CHARS = 100000
+async function addPageToClaude () {
+  const page = await pageForChat()
+  if (!page || !page.text.trim()) { toast('Open a page with text first'); return 'no-page' }
+  let body = page.text
+  if (body.length > MAX_SHARED_CHARS) { toast(`Long page: shared the first ${MAX_SHARED_CHARS.toLocaleString()} of ${body.length.toLocaleString()} characters`); body = body.slice(0, MAX_SHARED_CHARS) }
+  const text = `Here is a web page I'm reading.\nTitle: ${page.title}\nURL: ${page.url}\n\n${body}\n\nMy question: `
+  if (await typeIntoClaude(text)) return 'typed'
+  clipboard.writeText(text)
+  toast('Copied the page — click Claude’s message box and press ⌘V (sign in first if needed)')
+  return 'copied'
+}
+async function askClaudeAccount (question) {
+  toggleChat(true)
+  const wc = claudeWeb.webContents
+  if (!wc.getURL().startsWith(CLAUDE_HOME)) { wc.loadURL(CLAUDE_HOME).catch(() => {}); await new Promise(r => setTimeout(r, 600)) }
+  if (!(await typeIntoClaude(question))) { clipboard.writeText(question); toast('Copied your question — paste it into Claude (⌘V)') }
+}
+function chatMenu () {
+  const acct = accountMode()
+  Menu.buildFromTemplate([
+    { label: 'Use my Claude account (Pro, Max, Team)', type: 'radio', checked: acct, click: () => setClaudeMode('account') },
+    { label: 'Use an API key', type: 'radio', checked: !acct, click: () => setClaudeMode('api') },
+    { type: 'separator' },
+    ...(acct ? [{ label: 'Sign Out of Claude in Drift…', click: () => signOutClaude() }] : [{ label: claudeKey() ? 'Change API Key…' : 'Add API Key…', click: () => promptClaudeKey() }]),
+    { label: 'Claude Settings…', click: () => openSettings('integrations') }
+  ]).popup({ window: win })
+}
+async function signOutClaude () {
+  const { response } = await dialog.showMessageBox(win, { type: 'question', buttons: ['Sign Out', 'Cancel'], defaultId: 1, cancelId: 1, message: 'Sign out of your Claude account in Drift?', detail: 'This clears claude.ai cookies and data stored by Drift. Your chats stay in your Claude account.' })
+  if (response !== 0) return
+  await claudeSession().clearStorageData(); await claudeSession().clearCache()
+  claudeWeb?.webContents.loadURL(CLAUDE_HOME).catch(() => {})
+  toast('Signed out of Claude'); sendSettings()
 }
 async function pageForChat () {
   const v = views.get(activeTabId()); if (!v) return null
@@ -1255,6 +1465,11 @@ Object.assign(LATE_ACTIONS, {
   'chat-stop': () => claudeChat.stop(),
   'chat-reset': () => { claudeChat.reset(); chatView?.webContents.send('chat', 'reset') },
   'chat-close': () => toggleChat(false),
+  'chat-menu': () => chatMenu(),
+  'chat-mode': (m) => setClaudeMode(m),
+  'claude-add-page': () => addPageToClaude(),
+  'claude-reload': () => claudeWeb?.webContents.reload(),
+  'claude-open-tab': () => { const u = claudeWeb?.webContents.getURL(); newTab(u && u.startsWith('https://claude.ai') ? u : CLAUDE_HOME) },
   'chat-model': (m) => { if (CLAUDE_MODELS.some(([id]) => id === m)) { S.settings.claudeModel = m; store.save(); sendSettings() } },
   'chat-open-link': (u) => { if (typeof u === 'string' && /^https?:\/\//.test(u)) newTab(u) },
   'toggle-chat': () => toggleChat()
@@ -1352,6 +1567,7 @@ function settingsData () {
     mcpCli: `claude mcp add drift --env ELECTRON_RUN_AS_NODE=1 --env DRIFT_MCP_CONFIG="${mcpConfigFile()}" -- "${process.execPath}" "${mcpBridgePath()}"`,
     claudeModels: CLAUDE_MODELS,
     hasClaudeKey: !!claudeKey(),
+    claudeMode: S.settings.claudeMode,
     syncOn: S.sync.enabled,
     syncStatus: S.sync.enabled ? `On · ${S.sync.folder} · last sync ${S.sync.lastSyncAt ? new Date(S.sync.lastSyncAt).toLocaleTimeString() : 'never'}` : 'Off — encrypted sync through iCloud Drive or any folder',
     extensions: PRIVATE ? 0 : allExtensions().length,
@@ -1360,12 +1576,12 @@ function settingsData () {
       ['⌘T', 'New tab / command bar'], ['⌘L', 'Edit URL'], ['⌘W', 'Close tab'], ['⌘⇧T', 'Reopen closed tab'], ['⌘D', 'Pin / unpin tab'],
       ['⌘S', 'Toggle sidebar'], ['⌃⇧=', 'Add split view'], ['⌃⇧-', 'Separate split view'], ['⌃1…9', 'Switch space'], ['⌘1…9', 'Jump to tab'],
       ['⌘⌥←/→', 'Previous / next space'], ['⌃Tab', 'Next tab'], ['⌘F', 'Find in page'], ['⌘⇧C', 'Copy URL'], ['⌘⇧A', 'Archived tabs'],
-      ['⌘⇧N', 'New private window'], ['⌥⌘N', 'Little Window (any app)'], ['⇧-click', 'Peek a link'], ['⌘⇧I', 'Site Inspector'], ['⌘,', 'Settings'], ['⌘⌥I', 'Developer tools']
+      ['⌘⇧N', 'New private window'], ['⌥⌘P', 'Pop out video (floating window)'], ['⌘E', 'Claude panel'], ['⌥⌘N', 'Little Window (any app)'], ['⇧-click', 'Peek a link'], ['⌘⇧I', 'Site Inspector'], ['⌘,', 'Settings'], ['⌘⌥I', 'Developer tools']
     ]
   }
 }
 function sendSettings () { if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send('settings', settingsData()) }
-const SETTING_TYPES = { searchEngine: 'string', aiProvider: 'string', proxyMode: 'string', proxyRules: 'string', proxyBypass: 'string', proxyPac: 'string', downloadMode: 'string', icon: 'string', claudeModel: 'string', claudeEffort: 'string', archiveAfterMs: 'number', memorySaverMs: 'number' }
+const SETTING_TYPES = { searchEngine: 'string', aiProvider: 'string', proxyMode: 'string', proxyRules: 'string', proxyBypass: 'string', proxyPac: 'string', downloadMode: 'string', icon: 'string', claudeMode: 'string', claudeModel: 'string', claudeEffort: 'string', archiveAfterMs: 'number', memorySaverMs: 'number' }
 async function setSetting (key, value) {
   if (!(key in DEFAULTS.settings)) return
   const type = SETTING_TYPES[key] || 'boolean'
@@ -1383,6 +1599,7 @@ async function setSetting (key, value) {
   if (key === 'miniHotkey') registerHotkeys()
   if (key === 'mcpEnabled') setupMcp()
   if (key === 'claudeModel') chatView?.webContents.send('chat', 'init', chatInit())
+  if (key === 'claudeMode' && chatOpen) toggleChat(true)
   if (key === 'archiveAfterMs' || key === 'memorySaverMs') autoArchive()
   sendSettings(); pushState()
 }
@@ -1409,7 +1626,8 @@ const SETTINGS_ACTIONS = {
   webstore: () => { win.focus(); runCommand('ext-store') },
   'export-data': () => exportData(),
   'claude-key': () => promptClaudeKey(),
-  'claude-open': () => { win.focus(); toggleChat(true) }
+  'claude-open': () => { win.focus(); toggleChat(true) },
+  'claude-signout': () => { win.focus(); signOutClaude() }
 }
 Object.assign(LATE_ACTIONS, {
   'settings-set': (k, v) => setSetting(k, v),
@@ -1551,7 +1769,8 @@ function tabContextMenu (tabId) {
   const tmpl = [
     { label: loc.type === 'favorite' ? 'Remove from Favorites' : 'Add to Favorites', click: () => toggleFavorite(tabId) },
     { label: loc.type === 'pinned' ? 'Unpin Tab' : 'Pin Tab', click: () => moveTab(tabId, loc.type === 'pinned' ? 'today' : 'pinned') },
-    { label: 'Open in Split View', enabled: !!sp.activeTabId && sp.activeTabId !== tabId, click: () => openSplit(tabId) },
+    { label: 'Open in Split View', enabled: !!sp.activeTabId && sp.activeTabId !== tabId && !inSplit(sp, tabId), click: () => openSplit(tabId) },
+    ...(inSplit(sp, tabId) ? [{ label: 'Remove from Split View', click: () => { removeFromSplit(sp, tabId); layout(); pushState(); store.save() } }] : []),
     { label: 'Duplicate', click: () => duplicateTab(tabId) },
     { label: 'Copy Link', click: () => copyUrl(tabId) },
     { label: lv?.muted ? 'Unmute' : 'Mute', enabled: !!lv, click: () => toggleMute(tabId) }
@@ -1615,7 +1834,7 @@ function pushState () {
 function toast (msg) { win?.webContents.send('toast', msg) }
 
 // ---------------------------------------------------------------- IPC (only from our own UI views)
-const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents)
+const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents)
 const ACTIONS = {
   ready: () => { pushState(); layout() },
   activate: (id) => activateTab(id),
@@ -1633,7 +1852,11 @@ const ACTIONS = {
   'sidebar-width': (w) => { S.settings.sidebarWidth = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(w))); layout(); pushStateSoon(); store.save() },
   peek: (on) => { if (S.sidebarVisible) return; sidebarPeek = !!on; layout(); pushState() },
   'clear-today': clearToday,
-  'split-ratio': (r) => { const sp = space(); if (sp.split) { sp.split.ratio = Math.max(0.2, Math.min(0.8, r)); layout(); store.save() } },
+  'split-drag-start': (i) => startSplitDrag(Number(i)),
+  'split-drag': (x, y) => splitDrag(Number(x), Number(y)),
+  'split-drag-end': () => endSplitDrag(),
+  'split-equalize': () => { const sp = space(); if (sp.split) { sp.split.sizes = sp.split.ids.map(() => 1 / sp.split.ids.length); layout(); store.save() } },
+  'split-focus': (id) => { if (inSplit(space(), id)) activateTab(id) },
   unsplit,
   mute: (id) => toggleMute(id),
   'open-download': (p) => { if (downloads.some(d => d.path === p)) shell.showItemInFolder(p) },
@@ -1653,6 +1876,7 @@ const ACTIONS = {
     closeOverlay()
     if (!r) return
     if (r.type === 'command') return runCommand(r.id)
+    if (r.type === 'claude' && accountMode()) return askClaudeAccount(String(r.text || ''))
     if (r.type === 'claude') {
       const wasOpen = chatOpen; toggleChat(true)
       const askIt = () => chatView.webContents.send('chat', 'ask', String(r.text || ''))
@@ -1745,6 +1969,10 @@ function buildMenu () {
         { type: 'separator' },
         { label: 'Add Split View', accelerator: 'Ctrl+Shift+=', click: () => runCommand('split') },
         { label: 'Separate Split View', accelerator: 'Ctrl+Shift+-', click: unsplit },
+        { label: 'Split Side by Side', click: () => setSplitDir('row') },
+        { label: 'Split Stacked', click: () => setSplitDir('col') },
+        { type: 'separator' },
+        { label: 'Pop Out Video', accelerator: 'Alt+CmdOrCtrl+P', click: () => runCommand('pip') },
         { type: 'separator' },
         { label: 'Developer Tools', accelerator: isMac ? 'Cmd+Alt+I' : 'Ctrl+Shift+I', click: () => runCommand('devtools') },
         { role: 'togglefullscreen' }
@@ -1820,6 +2048,12 @@ function createWindow () {
   win.on('enter-full-screen', pushState)
   win.on('leave-full-screen', () => { if (htmlFullscreen) navActive(wc => wc.executeJavaScript('document.fullscreenElement && document.exitFullscreen()').catch(() => {})); pushState() })
   win.on('close', () => store.saveNow())
+  // Switching to another app: pop the playing video out so it keeps playing on top; bring it back on return
+  win.on('blur', () => setTimeout(() => {
+    if (!S.settings.pipOnAppSwitch || !win || win.isDestroyed() || BrowserWindow.getFocusedWindow()) return
+    const id = activeTabId(); if (id) popOutVideo(id, { auto: true })
+  }, 250))
+  win.on('focus', () => { if (pip?.auto && pip.tabId === activeTabId()) returnVideo(pip.tabId) })
   win.on('closed', () => { for (const m of miniWindows) m.win.close() })
   win.on('closed', () => { win = null; overlay = null; views.clear(); wcToTab.clear(); live.clear() })
   // restore the active tab
@@ -1836,7 +2070,12 @@ function sanitizeState () {
   for (const sp of S.spaces) {
     sp.pinned = clean(sp.pinned || []); sp.today = clean(sp.today || [])
     if (!profile(sp.profileId)) sp.profileId = 'default'
-    if (sp.split && !(seen.has(sp.split.a) && seen.has(sp.split.b))) sp.split = null
+    if (sp.split && sp.split.a) sp.split = { ids: [sp.split.a, sp.split.b], dir: 'row', sizes: [sp.split.ratio || 0.5, 1 - (sp.split.ratio || 0.5)] }
+    if (sp.split) {
+      const keep = sp.split.ids.map((id, i) => [id, sp.split.sizes?.[i] || 1]).filter(([id]) => seen.has(id)).slice(0, MAX_SPLIT)
+      const sum = keep.reduce((a, [, f]) => a + f, 0)
+      sp.split = keep.length >= 2 ? { ids: keep.map(([id]) => id), dir: sp.split.dir === 'col' ? 'col' : 'row', sizes: keep.map(([, f]) => f / sum) } : null
+    }
   }
   for (const id of Object.keys(S.tabs)) if (!seen.has(id)) delete S.tabs[id]
   if (!space()) S.activeSpaceId = S.spaces[0].id
@@ -1912,4 +2151,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay } })

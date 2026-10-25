@@ -1,0 +1,8 @@
+:root{--bg:#fbfaf7;--fg:#22201c;--muted:#7a756c;--hover:#0000000d;--accent:#c96442;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#262624;--fg:#ece9e2;--muted:#a39e94;--hover:#ffffff14;--accent:#d97757;color-scheme:dark}}
+html,body{margin:0;height:100%;overflow:hidden}
+body{display:flex;align-items:center;gap:4px;padding:0 8px 0 14px;background:var(--bg);color:var(--fg);font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;user-select:none}
+.title{font-weight:600;color:var(--accent);flex:1}
+button{border:0;background:none;color:inherit;font:inherit;height:28px;min-width:28px;border-radius:7px;opacity:.75}
+button:hover{background:var(--hover);opacity:1}
+.pill{padding:0 10px;opacity:1;color:var(--accent);font-weight:600}

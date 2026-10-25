@@ -92,9 +92,14 @@ const render = {
   ],
   integrations: () => [
     sec('Claude'),
-    card(button('Claude API key', D.hasClaudeKey ? 'Saved · encrypted in your Keychain' : 'Not set — get one at console.anthropic.com (or set ANTHROPIC_API_KEY)', D.hasClaudeKey ? 'Change…' : 'Add Key…', () => act('claude-key')),
-      select('claudeModel', 'Model', D.claudeModels),
-      select('claudeEffort', 'Effort', [['low', 'Low — fastest'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high'], ['max', 'Max — most thorough']], 'How hard Claude thinks before answering'),
+    card(select('claudeMode', 'Chat with Claude using', [['account', 'My Claude account (Pro, Max, Team)'], ['api', 'An API key']],
+      D.claudeMode === 'api' ? 'Pay-per-use through the Claude API' : 'Sign in on claude.ai inside the panel — uses your plan, no API key needed'),
+      ...(D.claudeMode === 'api'
+        ? [button('Claude API key', D.hasClaudeKey ? 'Saved · encrypted in your Keychain' : 'Not set — get one at console.anthropic.com (or set ANTHROPIC_API_KEY)', D.hasClaudeKey ? 'Change…' : 'Add Key…', () => act('claude-key')),
+            select('claudeModel', 'Model', D.claudeModels),
+            select('claudeEffort', 'Effort', [['low', 'Low — fastest'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high'], ['max', 'Max — most thorough']], 'How hard Claude thinks before answering')]
+        : [button('Claude account', 'Your login stays in Drift’s isolated claude.ai session', 'Sign Out…', () => act('claude-signout'), 'danger'),
+            button('API key (optional)', D.hasClaudeKey ? 'Saved — switch to “An API key” above to use it' : 'Only needed if you prefer pay-per-use', D.hasClaudeKey ? 'Change…' : 'Add Key…', () => act('claude-key'))]),
       button('Chat panel', 'Ask about the page you’re on, or anything else', 'Open (⌘E)', () => act('claude-open'))),
     sec('MCP'),
     note('MCP (Model Context Protocol) lets Claude Desktop, Claude Code and other MCP clients control Drift: list and open tabs, read the page you’re on, search your history and switch spaces.'),
@@ -115,7 +120,8 @@ const render = {
     return el('label', { class: 'row' }, r, el('img', { src: ic.src }), label(ic.name), D.settings.icon === ic.id ? el('span', { class: 'pill' }, 'CURRENT ICON') : null)
   }))],
   advanced: () => [
-    card(toggle('pipOnLeave', 'Picture in Picture when you leave a video tab'),
+    card(toggle('pipOnLeave', 'Picture in Picture when you leave a video tab', 'The video keeps playing in a small floating window you can move and resize'),
+      toggle('pipOnAppSwitch', 'Picture in Picture when you switch to another app', 'The floating video stays on top of other apps; it returns to the page when you come back'),
       toggle('boostsEnabled', 'Enable Boosts on websites you visit', 'Per-site styles — run “Boost This Site” from the command bar'),
       select('memorySaverMs', 'Memory Saver: unload inactive tabs after', [[15 * MIN, '15 minutes'], [30 * MIN, '30 minutes'], [HOUR, '1 hour'], [4 * HOUR, '4 hours'], [0, 'Never']], 'Frees memory from background tabs; they reload when you return')),
     el('div', { class: 'row' }, el('button', { class: 'b', onclick: () => act('export-data') }, 'Export Data…'), el('span', { style: 'flex:1' }), el('button', { class: 'b danger', onclick: () => act('reset-perms') }, 'Reset All Site Permissions'))

@@ -32,3 +32,4 @@ footer{padding:8px 10px 12px;border-top:1px solid var(--line)}
 textarea{flex:1;border:0;outline:0;resize:none;background:none;color:var(--fg);font:inherit;max-height:160px}
 #send{background:var(--accent);color:#fff;opacity:1;border-radius:50%;font-weight:700}
 #send.stop{background:var(--muted)}
+.empty a{color:var(--accent)}
