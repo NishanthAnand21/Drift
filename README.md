@@ -47,14 +47,15 @@ Regenerate the icon from `build/icon.svg` with `npm run icon`.
 | Create Visual | **+ → New Visual** or the command bar turns the page you're on into a **slide deck, poster, infographic or dashboard** in your space's colours. It reads your open tab, so it works behind logins too. With an API key, Claude builds it into a tab, and **Export Visual as PDF** saves it to Downloads. Generated visuals have scripts stripped and run under a no-script Content-Security-Policy. Without a key, the request and page are typed into Claude on claude.ai, which builds it as an artifact using your plan. |
 | No-toolbar window | Inset traffic lights. The sidebar holds back/forward/reload and the URL pill. ⌘S (or the sidebar button) hides the sidebar, and the page fills the window. Hover the left edge and the sidebar floats over the page without resizing it. It slides away when the pointer leaves. Only the sidebar button or ⌘S docks it again. |
 | Command bar | **⌘T** opens a new tab. **⌘L** edits the current URL. It searches open tabs, history, archived tabs and commands, shows live search suggestions, and is used for every setting. |
-| Spaces | Ctrl+1…9 or ⌘⌥←/→ to switch. Click **＋** at the bottom or press ⌘⇧N to create one. Right-click a space dot to rename it, change its colour (the whole window is tinted) or change its profile. |
+| Spaces | Swipe left or right with two fingers on the sidebar, or use Ctrl+1…9 or ⌘⌥←/→ to switch. Click **＋** at the bottom or press ⌘⇧N to create one. Right-click a space dot to rename it, change its colour (the whole window is tinted) or change its profile. |
 | Profiles | Pick “New Space with New Profile” for separate cookies, logins, storage and favourites. Spaces can share a profile. |
 | Favourites & pinned | ⌘D pins or unpins. Use right-click or drag to favourite. ⌘W on a pinned or favourite tab only unloads it, and the tab goes back to its pinned URL. |
-| Split view | Up to **4 tabs** at once, side by side or stacked. **Ctrl+⇧=** adds a pane: it opens the command bar so you can pick a tab or page for it. You can also right-click a tab → Open in Split View, or right-click a link → Open Link in Split View. Drag the dividers to resize, and double-click one to make the panes equal. The focused pane has a coloured outline. Use **Split View: Side by Side / Stacked** in the command bar, **Remove Tab from Split View**, or **Ctrl+⇧-** to separate the panes. |
+| Split view | Up to **4 tabs** at once, side by side or stacked. **Ctrl+⇧=** adds a pane: it opens the command bar so you can pick a tab or page for it. You can also right-click a tab → Open in Split View, or right-click a link → Open Link in Split View. Drag the dividers to resize, and double-click one to make the panes equal. The focused pane has a coloured outline. Each pane has its own toolbar: back, forward, reload, its address (click it to edit), site controls, a split menu, and × to take that tab out of the split. In the sidebar, the split's tabs show as one combined row. Use **Split View: Side by Side / Stacked** in the command bar, **Remove Tab from Split View**, or **Ctrl+⇧-** to separate the panes. |
 | Floating video | Switch tabs or apps while a video is playing and it pops out into Chromium's native Picture-in-Picture window. You can move it anywhere and resize it, and on macOS it stays on top of other apps. Return to the tab, or to Drift, and the video goes back into the page. **⌥⌘P** pops it out by hand. Both automatic triggers can be turned off in Settings → Advanced. |
 | Peek | ⇧-click a link, or right-click it → **Open Link in Peek**, to preview it in a popup over the page. From there, open it as a tab or in split view. |
 | Auto-archive | Unpinned tabs not used for 12 h (you can choose 24 h, 7 d, 30 d or never) move to the archive. ⌘⇧A or ⌂ shows the archive, and the command bar searches it. **↓ Clear** archives today's tabs now. |
 | Memory | Memory Saver unloads tabs you haven't used for a while (30 min by default); background tabs are throttled |
+| Back & forward | The sidebar ← → buttons, ⌘[ / ⌘], a two-finger swipe on the page (an arrow slides in from the edge), a three-finger swipe, or the mouse's back/forward buttons. Each tab keeps its history when it's unloaded to save memory and when Drift restarts. A page that fails to load shows an error page; Reload tries the address again, and Back skips it. |
 | Other | ⌘F find in page, ⌘⇧T reopen a closed tab, ⌘⇧C copy the URL, ⌘1…9 jump to a tab, Ctrl+Tab cycle tabs, ⌘± zoom, ⌘⌥I DevTools, per-tab mute, downloads in the sidebar, crash and error pages, opens links when set as the default browser. |
 
 ## Extensions, passwords, sync, private windows
@@ -149,6 +150,10 @@ src/web/error.html    error / HTTPS-Only / crash page
 `DRIFT_SELFTEST=/some/dir npm start -- --no-sandbox` runs a scripted end-to-end test. It loads
 real sites and checks pinning, favourites, split view, the command bar, spaces, profiles and
 auto-archive. It writes `results.txt` and screenshots to that directory (Linux, under `xvfb-run`).
+
+`npm run doctor` checks your setup: the Node and Electron versions, the generated preload, and which release-signing variables are set (it never prints their values).
+
+[ARCHITECTURE.md](ARCHITECTURE.md) describes the process model, the trust boundaries and the security invariants every change must keep.
 
 ## Author
 
