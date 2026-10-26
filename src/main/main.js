@@ -545,9 +545,13 @@ function saveNav (t, wc) {
 // goes to the page before (it used to land on the failed address, fail again and trap you); a
 // successful retry replaces the error page the same way.
 function tidyHistory (wc, url) {
-  const nh = wc.navigationHistory; const i = nh.getActiveIndex(); if (i < 1) return
-  const prev = nh.getEntryAtIndex(i - 1)?.url
-  if (isInternalPage(url) ? prev === failedUrlOf(url) : isInternalPage(prev) && failedUrlOf(prev) === url) nh.removeEntryAtIndex(i - 1)
+  const nh = wc.navigationHistory; const failed = isInternalPage(url) ? failedUrlOf(url) : null
+  // also drops an earlier error page for the same address, so a retry that fails again doesn't pile up
+  for (let i = nh.getActiveIndex() - 1; i >= 0; i = nh.getActiveIndex() - 1) {
+    const prev = nh.getEntryAtIndex(i)?.url
+    const same = isInternalPage(prev) ? failedUrlOf(prev) === (failed || url) : !!failed && prev === failed
+    if (!same || !nh.removeEntryAtIndex(i)) break
+  }
 }
 
 function destroyView (tabId) {

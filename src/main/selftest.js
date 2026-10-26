@@ -459,7 +459,7 @@ module.exports = (D) => {
       for (const type of ['keyDown', 'char', 'keyUp']) D.overlay.webContents.sendInputEvent({ type, keyCode: type === 'char' ? '\r' : 'Return' })
       await wait(3500)
       const lnow = D.space().activeTabId
-      ok('⌘L: Enter opens what you typed, not the row under the pointer', lnow === lid && (D.tab(lnow)?.url || '').includes('/en/learn'), `${lnow === lid ? '' : 'active tab changed; '}${D.tab(lnow)?.url}`)
+      ok('⌘L: Enter opens what you typed, not the row under the pointer', lnow === lid && /nodejs\.org\/(en\/)?learn/.test(D.tab(lnow)?.url || ''), `${lnow === lid ? '' : 'active tab changed; '}${D.tab(lnow)?.url}`)
       if (D.overlayOpen) D.closeOverlay()
       // ---- split view: a toolbar on every pane, one combined row in the sidebar
       D.openSplit('https://nodejs.org/en/download'); await wait(3500); await shot('23-split-toolbars')
