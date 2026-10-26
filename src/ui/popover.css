@@ -1,8 +1,18 @@
-:root{--bg:#1c1b21;--fg:#f3f2f7;--muted:#a3a1ad;--tile:#ffffff12;--tile2:#ffffff0c;--line:#ffffff1a;--hover:#ffffff12;--edge:#ffffff1a;color-scheme:dark}
+:root{--bg:#1c1b21;--fg:#f3f2f7;--muted:#a3a1ad;--tile:#ffffff12;--tile2:#ffffff0c;--line:#ffffff1a;--hover:#ffffff12;--edge:#ffffff1a;color-scheme:dark;--ease:cubic-bezier(.2,.8,.2,1);--spring:cubic-bezier(.34,1.56,.64,1)}
 :root.light{--bg:#ffffff;--fg:#1d1a24;--muted:#6f6b79;--tile:#0000000a;--tile2:#00000008;--line:#00000014;--hover:#0000000b;--edge:#00000014;color-scheme:light}
 html,body{margin:0;height:100%;background:transparent;overflow:hidden;font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--fg);user-select:none;-webkit-font-smoothing:antialiased}
 #card{position:absolute;box-sizing:border-box;background:var(--bg);border-radius:13px;box-shadow:0 12px 36px #0000004d,0 0 0 .5px var(--edge);padding:8px}
 #arrow{position:absolute;width:12px;height:12px;background:var(--bg);transform:rotate(45deg);border-radius:2px}
+/* popover.js sets #card's transform-origin to the arrow, adds body.in on every open (restarting this) and body.out for ~110ms before it closes */
+@keyframes pop-in{from{opacity:0;transform:scale(.94)}}
+@keyframes arrow-in{from{opacity:0;transform:rotate(45deg) scale(.5)}}
+@keyframes pop-out{to{opacity:0;transform:scale(.96)}}
+@keyframes arrow-out{to{opacity:0;transform:rotate(45deg) scale(.6)}}
+body.in #card{animation:pop-in 180ms var(--spring)}
+body.in #arrow{animation:arrow-in 180ms var(--spring)}
+body.out{pointer-events:none}
+body.out #card{animation:pop-out 120ms var(--ease) forwards}
+body.out #arrow{animation:arrow-out 120ms var(--ease) forwards}
 svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;display:block;flex:none}
 /* + menu */
 .mi{display:flex;align-items:center;gap:11px;padding:7px 10px;border-radius:8px;font-weight:500;font-size:13.5px}
@@ -37,3 +47,8 @@ h4{margin:11px 4px 6px;font-size:12.5px;font-weight:650}
 .foot .blk{color:var(--muted);font-size:12px}
 .dots{margin-left:auto;width:28px;height:28px;border-radius:50%;display:grid;place-items:center}
 .dots:hover{background:var(--hover)}
+/* hover fades, quick press, springy release */
+.mi,.act,.set,.ext,.pill,.dots{transition:background-color 120ms var(--ease),color 120ms var(--ease),transform 220ms var(--spring)}
+.mi:active,.set:active{transform:scale(.97)}.act:active,.ext:active{transform:scale(.94)}.pill:active,.dots:active{transform:scale(.95)}
+.mi:active,.act:active,.set:active,.ext:active,.pill:active,.dots:active{transition:background-color 120ms var(--ease),color 120ms var(--ease),transform 90ms var(--ease)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms!important;animation-iteration-count:1!important;transition-duration:1ms!important}}

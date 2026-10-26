@@ -74,15 +74,18 @@ function place (d) {
   card.style.width = W + 'px'
   const a = d.anchor; const vw = innerWidth; const vh = innerHeight
   if (!a) return
+  let left
   if (d.place === 'above') {
-    const left = Math.max(8, Math.min(a.x + a.width - W + 22, vw - W - 8))
+    left = Math.max(8, Math.min(a.x + a.width - W + 22, vw - W - 8))
     card.style.left = left + 'px'; card.style.top = 'auto'; card.style.bottom = (vh - a.y + 12) + 'px'
     arrow.style.left = (a.x + a.width / 2 - 6) + 'px'; arrow.style.top = (a.y - 18) + 'px'
   } else {
-    const left = Math.max(8, Math.min(a.x + a.width / 2 - W * 0.75, vw - W - 8))
+    left = Math.max(8, Math.min(a.x + a.width / 2 - W * 0.75, vw - W - 8))
     card.style.left = left + 'px'; card.style.bottom = 'auto'; card.style.top = (a.y + a.height + 12) + 'px'
     arrow.style.left = (a.x + a.width / 2 - 6) + 'px'; arrow.style.top = (a.y + a.height + 7) + 'px'
   }
+  // the card grows out of the arrow's tip: x under the anchor, y at the edge that faces it
+  card.style.transformOrigin = (a.x + a.width / 2 - left) + 'px ' + (d.place === 'above' ? card.offsetHeight : 1) + 'px'
 }
 api.on('popover', (d) => {
   if (!d) return

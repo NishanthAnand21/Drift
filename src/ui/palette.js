@@ -89,6 +89,7 @@ let warmTimer = null
 function warm () { clearTimeout(warmTimer); warmTimer = setTimeout(() => { const r = results[sel]; const u = r?.url || (r?.type === 'go' && /^https:\/\//.test(r.text || '') ? r.text : null); if (u) api.send('preconnect', u) }, 120) }
 
 function submit (shift) {
+  if (closeTimer) return
   if (O.mode === 'find') return api.send('find', q.value, shift ? 'prev' : 'next')
   if (O.mode === 'prompt') return api.send('prompt-result', O.key, q.value.trim())
   const r = results[sel]
@@ -98,7 +99,18 @@ function submit (shift) {
   if (!r) { if (text) api.send('palette-submit', { type: 'go', text: q.value }); else close(); return }
   api.send('palette-submit', r)
 }
-function close () { if (O?.mode === 'prompt' || O?.mode === 'pick') api.send('prompt-result', O.key, null); else api.send('overlay-close') }
+// Closing without a result plays a short exit (.closing) and only then tells main; submits never wait.
+// A re-open (or a second close) while the timer runs cancels/ignores it, so a stale close can't hit the next overlay.
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)')
+let closeTimer = null
+function close () {
+  if (closeTimer) return
+  const o = O
+  const send = () => { closeTimer = null; if (o?.mode === 'prompt' || o?.mode === 'pick') api.send('prompt-result', o.key, null); else api.send('overlay-close') }
+  if (!o || o.mode === 'peek' || reduceMotion.matches) return send()
+  document.body.classList.remove('opening'); document.body.classList.add('closing')
+  closeTimer = setTimeout(send, 110)
+}
 
 q.addEventListener('input', () => {
   sel = 0
@@ -111,6 +123,7 @@ q.addEventListener('input', () => {
   } else sugg = []
 })
 q.addEventListener('keydown', (e) => {
+  if (closeTimer) { e.preventDefault(); return }
   if (e.key === 'Tab' && O.snapshot.ai && !aiMode && ['new', 'edit'].includes(O.mode)) {
     const name = (AI[O.snapshot.ai] || AI.claude)[0].toLowerCase()
     if (q.value.trim().toLowerCase() === name || q.value.trim().toLowerCase() === 'claude') {
@@ -124,9 +137,12 @@ document.getElementById('backdrop').onmousedown = close
 
 const TITLES = { split: 'Open in split view', archive: 'Archived tabs', edit: '' , new: '' }
 api.on('open', (o) => {
+  clearTimeout(closeTimer); closeTimer = null
   O = o; sel = 0; sugg = []; aiMode = null; lastPointer = null
   document.documentElement.style.setProperty('--space', o.snapshot.color)
   document.body.className = ['find', 'peek', 'report'].includes(o.mode) ? o.mode : ''
+  void document.body.offsetWidth // flush so adding .opening restarts the entrance even if it was already there
+  document.body.classList.add('opening')
   if (o.mode === 'peek') { document.getElementById('peekurl').textContent = o.query; document.getElementById('peektitle').textContent = '' }
   if (o.mode === 'report') renderReport(o.report)
   const tm = o.snapshot.themeMode
@@ -150,14 +166,14 @@ for (const k of FIND_OPTS) {
 }
 document.getElementById('f-prev').onclick = () => { api.send('find', q.value, 'prev'); q.focus() }
 document.getElementById('f-next').onclick = () => { api.send('find', q.value, 'next'); q.focus() }
-document.getElementById('f-close').onclick = () => api.send('overlay-close')
+document.getElementById('f-close').onclick = close
 
 api.on('peek-title', (t) => { document.getElementById('peektitle').textContent = t })
 document.getElementById('peek-open').onclick = () => api.send('peek-open-tab')
 document.getElementById('peek-split').onclick = () => api.send('peek-split')
-document.getElementById('peek-close').onclick = () => api.send('overlay-close')
-document.getElementById('report-close').onclick = () => api.send('overlay-close')
-addEventListener('keydown', (e) => { if (e.key === 'Escape' && O && (O.mode === 'peek' || O.mode === 'report')) api.send('overlay-close') })
+document.getElementById('peek-close').onclick = close
+document.getElementById('report-close').onclick = close
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && O && (O.mode === 'peek' || O.mode === 'report')) close() })
 
 function renderReport (r) {
   const box = document.getElementById('report-body')

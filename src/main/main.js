@@ -6,7 +6,7 @@ const {
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
-const { spawn } = require('child_process')
+const { spawn, execFile } = require('child_process')
 const { Store } = require('./store')
 const { isBlockedHost } = require('./blocker')
 const { createPasswords } = require('./passwords')
@@ -166,6 +166,7 @@ if (PRIVATE) Object.assign(DEFAULTS.spaces[0], { name: 'Private', color: '#55525
 
 let store, S, passwords
 const extensionsBySession = new Map() // session -> ElectronChromeExtensions
+let extSync = false // true while Drift tells the extension library about its own tab changes, so its selectTab callback doesn't echo them back
 let win = null
 let overlay = null // command bar / find bar / prompts
 let overlayOpen = null // { mode, ... }
@@ -193,12 +194,20 @@ const tab = (id) => S.tabs[id]
 const MAX_SPLIT = 4
 const inSplit = (sp, id) => !!sp?.split && sp.split.ids.includes(id)
 
-// Pinned folders: sp.pinned holds tab ids and folder ids; S.folders[fid] = { id, name, open, items: [tabIds] }
+// Folders: sp.pinned and sp.today hold tab ids and folder ids; S.folders[fid] = { id, name, open, items: [tabIds], tidyHost? }
+// (a Today folder is made by Tidy and disappears when its last tab does)
 const pinnedTabs = (sp) => sp.pinned.flatMap(id => S.folders[id] ? S.folders[id].items : [id])
+const todayTabs = (sp) => sp.today.flatMap(id => S.folders[id] ? S.folders[id].items : [id])
+const todayListOf = (sp, id) => [sp.today, ...sp.today.map(f => S.folders[f]?.items)].find(l => l?.includes(id))
+function dropToday (sp, id) { const l = todayListOf(sp, id); if (l) l.splice(l.indexOf(id), 1) }
+function pruneToday (sp) {
+  for (let i = sp.today.length - 1; i >= 0; i--) { const f = S.folders[sp.today[i]]; if (f && !f.items.length) { delete S.folders[sp.today[i]]; sp.today.splice(i, 1) } }
+}
 function locate (tabId) {
   for (const sp of S.spaces) {
     for (const fid of sp.pinned) if (S.folders[fid]?.items.includes(tabId)) return { type: 'pinned', space: sp, list: S.folders[fid].items, folder: fid }
     if (sp.pinned.includes(tabId)) return { type: 'pinned', space: sp, list: sp.pinned }
+    for (const fid of sp.today) if (S.folders[fid]?.items.includes(tabId)) return { type: 'today', space: sp, list: S.folders[fid].items, folder: fid }
     if (sp.today.includes(tabId)) return { type: 'today', space: sp, list: sp.today }
   }
   for (const p of S.profiles) if (p.favorites.includes(tabId)) return { type: 'favorite', profile: p, list: p.favorites }
@@ -405,17 +414,52 @@ function tidyTitle (title, url) {
   }
   return t.length > 48 ? t.slice(0, 46).trim() + '…' : t
 }
+const hostOf = (id) => { try { return new URL(tab(id).url).hostname.replace(/^www\./, '') } catch { return '' } }
+const SITE_NAMES = {
+  'docs.google.com': 'Google Docs', 'sheets.google.com': 'Google Sheets', 'drive.google.com': 'Google Drive', 'mail.google.com': 'Gmail', 'github.com': 'GitHub',
+  'youtube.com': 'YouTube', 'x.com': 'X', 'twitter.com': 'X', 'reddit.com': 'Reddit', 'stackoverflow.com': 'Stack Overflow', 'wikipedia.org': 'Wikipedia',
+  'notion.so': 'Notion', 'figma.com': 'Figma', 'linear.app': 'Linear', 'slack.com': 'Slack', 'chatgpt.com': 'ChatGPT', 'openai.com': 'OpenAI', 'claude.ai': 'Claude'
+}
+function siteName (host) {
+  for (const [k, v] of Object.entries(SITE_NAMES)) if (host === k || host.endsWith('.' + k)) return v
+  const parts = host.split('.')
+  if (parts.length < 2 || /^[\d.]+$/.test(host)) return host
+  const label = parts.length > 2 && /^(co|com|org|net|gov|edu|ac)$/.test(parts[parts.length - 2]) ? parts[parts.length - 3] : parts[parts.length - 2]
+  return label.charAt(0).toUpperCase() + label.slice(1)
+}
+// A group is named after what its tabs' titles share at the end ("… - YouTube", "… · GitHub"), else after the site
+function groupName (host, ids) {
+  const tails = ids.map(id => (tab(id).title || '').trim().split(/\s+[|\-–—·•:]\s+/)).map(p => (p.length > 1 ? p[p.length - 1].trim() : ''))
+  const shared = tails[0] && tails.every(x => x.toLowerCase() === tails[0].toLowerCase()) ? tails[0].slice(0, 30) : ''
+  return shared || siteName(host)
+}
+// Exact-duplicate URLs (never the active tab or a split tab) and the loose Today tabs of each site
+function dupeTabs (sp) {
+  const seen = new Set()
+  return todayTabs(sp).filter(id => { const u = tab(id)?.url; if (u === undefined) return false; if (seen.has(u) && id !== sp.activeTabId && !inSplit(sp, id)) return true; seen.add(u); return false })
+}
+function looseByHost (sp) {
+  const m = new Map()
+  for (const id of sp.today) { const h = tab(id) && !inSplit(sp, id) ? hostOf(id) : ''; if (h) m.set(h, [...(m.get(h) || []), id]) }
+  return m
+}
+const canTidy = (sp) => !!S.settings.tidyTabs && (dupeTabs(sp).length > 0 || [...looseByHost(sp).values()].some(ids => ids.length > 1))
 function tidyTabs () {
   const sp = space()
-  const seen = new Set(); let dupes = 0
-  for (const id of [...sp.today]) {
-    const t = tab(id); if (!t) continue
-    if (seen.has(t.url) && id !== sp.activeTabId) { sp.today.splice(sp.today.indexOf(id), 1); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]; dupes++ } else seen.add(t.url)
+  let dupes = 0
+  for (const id of dupeTabs(sp)) { const t = tab(id); dropToday(sp, id); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]; dupes++ }
+  let groups = 0; let grouped = 0
+  for (const [host, ids] of looseByHost(sp)) {
+    if (ids.length < 2) continue
+    let f = sp.today.map(id => S.folders[id]).find(x => x?.tidyHost === host)
+    if (!f) { const fid = uid('f'); f = S.folders[fid] = { id: fid, name: groupName(host, ids), open: true, items: [], tidyHost: host }; sp.today.splice(sp.today.indexOf(ids[0]), 0, fid) }
+    for (const id of ids) { sp.today.splice(sp.today.indexOf(id), 1); f.items.push(id) }
+    f.open = true; groups++; grouped += ids.length
   }
-  const hostOf = (id) => { try { return new URL(tab(id).url).hostname.replace(/^www\./, '') } catch { return '' } }
-  const order = []; for (const id of sp.today) { const h = hostOf(id); if (!order.includes(h)) order.push(h) }
-  sp.today.sort((a, b) => order.indexOf(hostOf(a)) - order.indexOf(hostOf(b)))
-  store.save(); pushState(); toast(`Tidied: grouped by site${dupes ? `, archived ${dupes} duplicate${dupes > 1 ? 's' : ''}` : ''}`)
+  pruneToday(sp)
+  store.save(); pushState()
+  const plural = (n, w) => `${n} ${w}${n > 1 ? 's' : ''}`
+  toast(groups || dupes ? [groups && `Tidied ${plural(grouped, 'tab')} into ${plural(groups, 'group')}`, dupes && `${groups ? 'archived' : 'Archived'} ${plural(dupes, 'duplicate')}`].filter(Boolean).join(', ') : 'Nothing to tidy')
 }
 
 // ---------------------------------------------------------------- Chrome extensions
@@ -431,7 +475,7 @@ function setupExtensions (ses) {
         const id = newTab(details.url || 'about:blank', { activate: details.active !== false })
         return [ensureView(id).webContents, win]
       },
-      selectTab: (wc) => { const id = wcToTab.get(wc.id); if (id) activateTab(id) },
+      selectTab: (wc) => { if (extSync) return; const id = wcToTab.get(wc.id); if (id) activateTab(id) },
       removeTab: (wc) => { const id = wcToTab.get(wc.id); if (id) closeTab(id) },
       createWindow: async (details) => {
         const url = [].concat(details.url || [])[0]
@@ -519,7 +563,8 @@ function ensureView (tabId) {
   wcToTab.set(wc.id, tabId)
   live.set(tabId, { loading: false, canBack: false, canFwd: false, blocked: 0, audible: false, muted: false, zoom: 0 })
   wireWebContents(tabId, wc)
-  extFor(tabId)?.addTab(wc, win)
+  extSync = true
+  try { extFor(tabId)?.addTab(wc, win) } finally { extSync = false }
   const vis = visualFile(t.url)
   // re-checked here too: it comes back from the state file
   const saved = t.nav?.entries?.[t.nav.index]?.url === t.url && t.nav.entries.every(e => isSafeWebUrl(e?.url)) ? t.nav : null
@@ -665,7 +710,7 @@ function wireWebContents (tabId, wc) {
       }
     }
     const loc = locate(tabId)
-    newTab(url, { spaceId: loc?.space?.id, activate: disposition !== 'background-tab' })
+    newTab(url, { spaceId: loc?.space?.id, activate: disposition !== 'background-tab', notify: true })
     return { action: 'deny' }
   })
   wc.on('did-create-window', (child) => {
@@ -715,7 +760,7 @@ function pageContextMenu (tabId, wc, p) {
   const items = []
   if (p.linkURL) {
     items.push(
-      { label: 'Open Link in New Tab', click: () => newTab(p.linkURL, { activate: false }) },
+      { label: 'Open Link in New Tab', click: () => newTab(p.linkURL, { activate: false, notify: true }) },
       { label: 'Open Link in Split View', click: () => openSplit(p.linkURL) },
       { label: 'Open Link in Peek', click: () => openPeek(p.linkURL) },
       { label: 'Copy Link', click: () => clipboard.writeText(p.linkURL) },
@@ -749,13 +794,13 @@ function pageContextMenu (tabId, wc, p) {
 }
 
 // ---------------------------------------------------------------- tab ops
-function newTab (url, { spaceId = S.activeSpaceId, activate = true } = {}) {
+function newTab (url, { spaceId = S.activeSpaceId, activate = true, notify = false } = {}) {
   const id = uid('t')
   S.tabs[id] = { id, url, title: url, favicon: null, createdAt: Date.now(), lastActiveAt: Date.now() }
   const sp = space(spaceId)
   sp.today.unshift(id)
   if (activate) activateTab(id)
-  else { ensureView(id); pushState() }
+  else { ensureView(id); pushState(); if (notify) showTabNotice(id) }
   store.save()
   return id
 }
@@ -776,7 +821,8 @@ function activateTab (tabId, { from } = {}) {
   sp.activeTabId = tabId
   tab(tabId).lastActiveAt = Date.now()
   ensureView(tabId)
-  try { extFor(tabId)?.selectTab(views.get(tabId).webContents) } catch {}
+  extSync = true
+  try { extFor(tabId)?.selectTab(views.get(tabId).webContents) } catch {} finally { extSync = false }
   if (chatOpen) chatView?.webContents.send('chat', 'page', tab(tabId).customTitle || tab(tabId).title)
   layout()
   if (!overlayOpen) views.get(tabId)?.webContents.focus()
@@ -799,13 +845,15 @@ function closeTab (tabId, { archive = true } = {}) {
     if (t.pinnedUrl) { t.url = t.pinnedUrl }
     for (const s of S.spaces) if (s.activeTabId === tabId) s.activeTabId = pickNeighbor(s, tabId)
   } else {
-    const idx = sp.today.indexOf(tabId)
-    if (idx >= 0) sp.today.splice(idx, 1)
+    const idx = todayTabs(sp).indexOf(tabId)
+    dropToday(sp, tabId)
     destroyView(tabId)
     recentlyClosed.push({ url: t.url, title: t.title, spaceId: sp.id })
     if (archive) archiveEntry(t, sp.id)
     delete S.tabs[tabId]
-    if (sp.activeTabId === tabId) sp.activeTabId = sp.today[Math.min(idx, sp.today.length - 1)] || pinnedTabs(sp)[0] || null
+    pruneToday(sp)
+    const rest = todayTabs(sp)
+    if (sp.activeTabId === tabId) sp.activeTabId = rest[Math.min(idx, rest.length - 1)] || pinnedTabs(sp)[0] || null
   }
   const now = space().activeTabId
   if (now) activateTab(now); else { layout(); pushState() }
@@ -813,8 +861,8 @@ function closeTab (tabId, { archive = true } = {}) {
 }
 
 function pickNeighbor (sp, tabId) {
-  const all = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...sp.today].filter(id => id !== tabId && views.has(id))
-  return all[0] || sp.today[0] || null
+  const all = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...todayTabs(sp)].filter(id => id !== tabId && views.has(id))
+  return all[0] || todayTabs(sp)[0] || null
 }
 
 function archiveEntry (t, spaceId) {
@@ -844,29 +892,31 @@ function autoArchive () {
   const now = Date.now()
   let changed = false
   for (const sp of S.spaces) {
-    for (const id of [...sp.today]) {
+    for (const id of todayTabs(sp)) {
       const t = tab(id)
       if (!t || id === sp.activeTabId) continue
       if (inSplit(sp, id) || pip?.tabId === id) continue
       if (live.get(id)?.audible) continue
       if (now - (t.lastActiveAt || 0) > limit) {
-        sp.today.splice(sp.today.indexOf(id), 1)
+        dropToday(sp, id)
         destroyView(id)
         archiveEntry(t, sp.id)
         delete S.tabs[id]
         changed = true
       }
     }
+    pruneToday(sp)
   }
   if (changed) { store.save(); layout(); pushState() }
 }
 
 function clearToday () {
   const sp = space()
-  for (const id of [...sp.today]) {
+  for (const id of todayTabs(sp)) {
     if (inSplit(sp, id)) continue
-    const t = tab(id); sp.today.splice(sp.today.indexOf(id), 1); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]
+    const t = tab(id); dropToday(sp, id); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]
   }
+  pruneToday(sp)
   if (!tab(sp.activeTabId) || !locate(sp.activeTabId)) sp.activeTabId = pickNeighbor(sp, null)
   if (sp.activeTabId) activateTab(sp.activeTabId); else { layout(); pushState() }
   store.save()
@@ -880,13 +930,14 @@ function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId, folderId =
   const oldProfile = profileIdOfTab(tabId)
   loc.list.splice(loc.list.indexOf(tabId), 1)
   let list
-  if (to === 'folder') { if (!S.folders[folderId] || !sp.pinned.includes(folderId)) { loc.list.push(tabId); return } list = S.folders[folderId].items; S.folders[folderId].open = true }
+  if (to === 'folder') { if (!S.folders[folderId] || !(sp.pinned.includes(folderId) || sp.today.includes(folderId))) { loc.list.push(tabId); return } list = S.folders[folderId].items; S.folders[folderId].open = true }
   else if (to === 'favorite') list = profile(sp.profileId).favorites
   else if (to === 'pinned') list = sp.pinned
   else list = sp.today
   if (index < 0 || index > list.length) index = to === 'today' && loc.type !== 'today' ? 0 : list.length
   list.splice(index, 0, tabId)
-  if (to === 'folder') to = 'pinned'
+  if (to === 'folder') to = sp.pinned.includes(folderId) ? 'pinned' : 'today' // a tab dropped into a Today folder stays unpinned
+  if (loc.space) pruneToday(loc.space)
   t.pinnedUrl = to === 'today' ? undefined : (t.pinnedUrl || t.url)
   if (to !== 'today' && loc.type === 'today' && S.settings.tidyTitles && !t.customTitle) t.customTitle = tidyTitle(t.title, t.url)
   if (to === 'today') delete t.customTitle
