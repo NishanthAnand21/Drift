@@ -63,9 +63,18 @@ browser-action-list::part(action):hover{background:var(--hover)}
 .row .x svg.i,.row .home svg.i{width:15px;height:15px}
 .row .snd{width:24px;height:24px;display:grid;place-items:center;opacity:.75}
 .row .snd svg.i{width:16px;height:16px}
-.row.loading img{animation:pulse 1s infinite alternate}
+.row.loading img,.half.loading img{animation:pulse 1s infinite alternate}
 @keyframes pulse{to{opacity:.35}}
 .row.split::after{content:"";position:absolute;left:2px;top:13px;bottom:13px;width:3px;border-radius:2px;background:var(--space)}
+.splitrow{gap:3px;padding:0 4px}
+.half{flex:1 1 0;min-width:0;height:35px;padding:0 4px 0 8px;border-radius:8px;display:flex;align-items:center;gap:8px;position:relative}
+.half:hover{background:var(--hover)}.row.active .half:hover{background:var(--line)}
+.half + .half::before{content:"";position:absolute;left:-2px;top:9px;bottom:9px;width:1px;background:var(--line)}
+.half.on{font-weight:600}
+.splitrow .x{width:22px;height:22px}
+.splitrow:hover .x{display:none}
+.splitrow .half:hover .x,.splitrow.active .x{display:grid;opacity:.6}
+.splitrow .half .x:hover{opacity:1}
 .newtab{color:var(--muted);font-weight:400}
 .newtab i svg.i{width:16px;height:16px}
 .divider{display:flex;align-items:center;gap:6px;margin:10px 4px 6px 10px;color:var(--muted);font-size:12.5px;font-weight:600}
@@ -113,6 +122,22 @@ body.collapsed #peek-edge{display:block}
 .divider-h::after{content:"";position:absolute;left:50%;top:50%;width:4px;height:36px;margin:-18px 0 0 -2px;border-radius:2px;background:var(--muted);opacity:.5}
 .divider-h.col::after{width:36px;height:4px;margin:-2px 0 0 -18px}
 .divider-h:hover::after{opacity:1}
+/* the 36px strip above each split pane's page; the pane's colour shows around the page's rounded corners */
+.pane{position:fixed;border-radius:10px;background:#f6f5f8;--ph:#0000000f}
+:root[data-mode=dark] .pane{background:#27252b;--ph:#ffffff17}
+.pbar,.pb,.purl{pointer-events:auto}
+.pbar{display:flex;align-items:center;gap:2px;height:36px;padding:0 6px;color:var(--fg)}
+.pbar .grp{flex:1 1 0;display:flex;align-items:center;gap:2px}
+.pbar .grp.r{justify-content:flex-end}
+.pb{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;opacity:.8}
+.pb svg.i{width:16px;height:16px}
+.pb:hover:not(:disabled){background:var(--ph);opacity:1}.pb:disabled{opacity:.3}
+.pane .pb.site,.pane .pb.split{display:none}
+.pane.active .pb.site,.pane.active .pb.split,.pane:hover .pb.site,.pane:hover .pb.split{display:grid}
+.purl{flex:0 1 auto;min-width:0;height:28px;padding:0 8px;border-radius:7px;display:flex;align-items:center;gap:6px;font-size:12.5px;opacity:.85}
+.purl:hover{background:var(--ph);opacity:1}
+.purl svg.i{width:13px;height:13px;opacity:.7}
+.purl span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 body.private #space-head::after{content:"nothing is saved";font-weight:400;font-size:11px;opacity:.7}
 
 /* folders */

@@ -20,6 +20,7 @@ const ICONS = {
   stop: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>',
   sliders: '<rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/><path d="M7.5 9.5h9M7.5 14.5h9"/><circle cx="10.5" cy="9.5" r="1.7"/><circle cx="13.5" cy="14.5" r="1.7"/>',
+  split: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M12 4.5v15"/>',
   claude: Array.from({ length: 12 }, (_, i) => { const a = i * Math.PI / 6; const r = i % 2 ? 6 : 8.5; return `<path d="M${(12 + Math.cos(a) * 2).toFixed(2)} ${(12 + Math.sin(a) * 2).toFixed(2)}L${(12 + Math.cos(a) * r).toFixed(2)} ${(12 + Math.sin(a) * r).toFixed(2)}"/>` }).join(''),
   broom: '<path d="M15.5 3.5l-4 8"/><path d="M7 12h8.5l1 8.5h-10.5z"/><path d="M9.5 16.5v4M12.5 16.5v4"/>',
   down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
@@ -98,6 +99,31 @@ function tabRow (t, zone) {
   bindTab(el, t)
   return el
 }
+// Tabs of the split that share a list become one entry ({ group }), in place of the first of them (Arc)
+function groupSplit (list) {
+  const group = (S.split?.ids || []).map(id => list.find(t => !t.folder && t.id === id)).filter(Boolean)
+  if (group.length < 2) return list
+  const first = list.find(t => group.includes(t))
+  return list.flatMap(t => t === first ? [{ group }] : group.includes(t) ? [] : [t])
+}
+function splitRow (tabs, zone) {
+  const el = document.createElement('div')
+  el.className = 'row splitrow' + (tabs.some(t => t.id === S.activeTabId) ? ' active' : '')
+  el.dataset.ids = tabs.map(t => t.id).join(',')
+  for (const t of tabs) {
+    const h = document.createElement('div'); h.className = 'half' + (t.id === S.activeTabId ? ' on' : '') + (t.loading ? ' loading' : '')
+    h.draggable = true; h.dataset.id = t.id; h.dataset.zone = zone
+    h.title = `${t.title}\n${t.url}`
+    const title = document.createElement('span'); title.className = 't'; title.textContent = t.title || host(t.url)
+    const x = document.createElement('button'); x.className = 'x'; x.append(svg(zone === 'today' ? 'close' : 'minus'))
+    x.title = zone === 'today' ? 'Close tab' : 'Unload tab'
+    x.onclick = (e) => { e.stopPropagation(); api.send('close', t.id) }
+    h.append(icon(t), title, x)
+    bindTab(h, t)
+    el.append(h)
+  }
+  return el
+}
 function favTile (t) {
   const el = document.createElement('div')
   el.className = 'fav' + (t.id === S.activeTabId ? ' active' : '') + (t.loaded ? '' : ' unloaded')
@@ -154,32 +180,38 @@ function patch (box, items, keyOf, sigOf, make) {
   while (box.children.length > next.length) box.lastChild.remove()
 }
 const inSplit = (id) => !!(S.split && S.split.ids.includes(id))
-const tabSig = (t, zone) => JSON.stringify([t, zone, t.id === S.activeTabId, inSplit(t.id)])
+const tabSig = (t, zone) => JSON.stringify(t.group ? [t.group, zone, t.group.find(x => x.id === S.activeTabId)?.id] : [t, zone, t.id === S.activeTabId, inSplit(t.id)])
+const rowKey = (t) => t.group ? 'split:' + t.group.map(x => x.id).join(',') : (t.folder ? 'f:' : '') + t.id
+const rowEl = (t, zone) => t.group ? splitRow(t.group, zone) : tabRow(t, zone)
 
 function clearDrop () { document.querySelectorAll('.over,.drop-before,.sp.drop').forEach(e => e.classList.remove('over', 'drop-before', 'drop')) }
+
+// The tab ids a list entry stands for: a split row counts as all of its tabs, so drop indexes match main's list
+const keysOf = (n) => n.dataset.ids ? n.dataset.ids.split(',') : [n.dataset.id || n.dataset.folder]
 
 function bindZone (z) {
     z.ondragover = (e) => {
       if (dragFolder && z.dataset.zone === 'pinned') { e.preventDefault(); clearDrop(); z.classList.add('over'); return }
       if (!dragId) return
       e.preventDefault(); clearDrop(); z.classList.add('over')
-      const target = e.target.closest('[data-id]'); if (target && target.dataset.id !== dragId) target.classList.add('drop-before')
+      const target = e.target.closest('.splitrow') || e.target.closest('[data-id]'); if (target && !keysOf(target).includes(dragId)) target.classList.add('drop-before')
     }
     z.ondragleave = (e) => { if (!z.contains(e.relatedTarget)) z.classList.remove('over') }
     z.ondrop = (e) => {
       e.preventDefault(); e.stopPropagation()
       // only this zone's own entries count (tabs, and folders in the pinned list) — not tabs inside nested folders
-      const own = [...z.children].map(n => n.matches('.folder') ? n.firstChild : n).filter(n => n.dataset.id || n.dataset.folder)
-      const key = (n) => n.dataset.id || n.dataset.folder
+      const own = [...z.children].map(n => n.matches('.folder') ? n.firstChild : n).filter(n => n.dataset.id || n.dataset.ids || n.dataset.folder)
       const target = [...own].find(n => n.contains(e.target))
       if (dragFolder) {
-        const ids = own.map(key).filter(k => k !== dragFolder)
-        api.send('move-folder', dragFolder, target ? Math.max(0, ids.indexOf(key(target))) : ids.length)
+        const ids = own.flatMap(keysOf).filter(k => k !== dragFolder)
+        api.send('move-folder', dragFolder, target ? Math.max(0, ids.indexOf(keysOf(target)[0])) : ids.length)
         dragFolder = null; clearDrop(); return
       }
       if (!dragId) return
-      const ids = own.map(key).filter(k => k !== dragId)
-      const index = target && key(target) !== dragId ? ids.indexOf(key(target)) : ids.length
+      const ids = own.flatMap(keysOf).filter(k => k !== dragId)
+      // dropping on a split row means before its first tab (or its other tab, when you drag one of its own)
+      const before = target && keysOf(target).find(k => k !== dragId)
+      const index = before ? ids.indexOf(before) : ids.length
       api.send('move', dragId, z.dataset.zone, index, null, z.dataset.folder || null)
       dragId = null; clearDrop()
     }
@@ -222,10 +254,10 @@ function render () {
   $('#space-profile').textContent = sp.profile && S.spaces.some(s => s.profile !== sp.profile) ? sp.profile : ''
   $('#space-head').oncontextmenu = (e) => { e.preventDefault(); api.send('space-menu', sp.id) }
   $('#space-head').ondblclick = () => api.send('space-edit', sp.id)
-  patch($('#pinned'), S.pinned, t => (t.folder ? 'f:' : '') + t.id,
+  patch($('#pinned'), groupSplit(S.pinned), rowKey,
     t => t.folder ? JSON.stringify([t, S.activeTabId, S.split?.ids, S.pinnedResetButton]) : tabSig(t, 'pinned'),
-    t => t.folder ? folderRow(t) : tabRow(t, 'pinned'))
-  patch($('#today'), S.today, t => t.id, t => tabSig(t, 'today'), t => tabRow(t, 'today'))
+    t => t.folder ? folderRow(t) : rowEl(t, 'pinned'))
+  patch($('#today'), groupSplit(S.today), rowKey, t => tabSig(t, 'today'), t => rowEl(t, 'today'))
 
   patch($('#spaces'), S.spaces, s => s.id, s => JSON.stringify([s.id, s.name, s.icon, s.profile, s.id === S.activeSpaceId]), s => {
     const b = document.createElement('button'); b.className = 'sp' + (s.id === S.activeSpaceId ? ' active' : '')
@@ -243,6 +275,7 @@ function render () {
   document.body.classList.toggle('dl-open', !!S.downloadsOpen)
   setIcon($('#b-newspace'), S.popoverOpen === 'menu' ? 'close' : 'plus')
   if (S.downloadsOpen) renderDownloads()
+  syncPanes()
 }
 
 // ---- downloads panel (Arc-style: thumbnail, name, “15 hours ago”; click to open, drag to Finder)
@@ -283,11 +316,59 @@ function renderDownloads () {
 api.on('dl-thumb', (id, url) => { thumbs.set(id, url); if (S?.downloadsOpen) renderDownloads() })
 setInterval(() => { if (S?.downloadsOpen) renderDownloads() }, 60e3)
 
-// Split view: outline the focused pane and put draggable dividers in the gaps between panes
+// Split view: every pane gets a toolbar in the strip main leaves above its page. Rebuilt only when the
+// panes or the sidebar change, updated in place otherwise (a button replaced mid-click loses the click)
+const px = (n) => n + 'px'
+const bare = (u) => u.replace(/^https?:\/\//, '').replace(/^www\./, '')
+let paneRects = null
+let paneKey = ''
+const paneEls = new Map()
+function paneBar (id, first) {
+  const el = document.createElement('div'); el.className = 'pane' + (first ? ' first' : ''); el.dataset.id = id
+  const btn = (cls, ic, title, fn) => {
+    const b = document.createElement('button'); b.className = 'pb ' + cls; b.title = title; setIcon(b, ic)
+    b.onclick = (e) => { e.stopPropagation(); fn(b) }
+    return b
+  }
+  const url = document.createElement('button'); url.className = 'purl'; url.append(svg('link'), document.createElement('span'))
+  url.onclick = (e) => { e.stopPropagation(); api.send('pane-url', id) }
+  const left = document.createElement('div'); left.className = 'grp'
+  if (first && !S.sidebarVisible) left.append(btn('side', 'sidebar', 'Show sidebar (⌘S)', () => api.send('toggle-sidebar')))
+  left.append(btn('back', 'back', 'Back', () => api.send('pane-nav', id, 'back')), btn('fwd', 'forward', 'Forward', () => api.send('pane-nav', id, 'forward')),
+    btn('reload', 'reload', 'Reload', () => api.send('pane-nav', id, 'reload')))
+  const right = document.createElement('div'); right.className = 'grp r'
+  right.append(btn('site', 'sliders', 'Site controls', (b) => api.send('pane-site', id, rectOf(b))), btn('split', 'split', 'Split view options', () => api.send('pane-menu', id)),
+    btn('x', 'close', 'Remove from split view', () => api.send('pane-close', id)))
+  const bar = document.createElement('div'); bar.className = 'pbar'; bar.onclick = () => api.send('split-focus', id)
+  bar.append(left, url, right); el.append(bar)
+  return el
+}
+function syncPanes () {
+  if (FLOAT) return
+  const rs = paneRects; const ps = S?.panes
+  const on = !!rs && !!ps && ps.length === rs.length && ps.every((p, i) => p.id === rs[i].id)
+  const key = on ? ps.map(p => p.id).join(',') + (S.sidebarVisible ? '' : '!') : ''
+  if (key !== paneKey) {
+    paneKey = key; paneEls.forEach(el => el.remove()); paneEls.clear()
+    if (on) { rs.forEach((r, i) => paneEls.set(r.id, paneBar(r.id, i === 0))); $('#panes').prepend(...paneEls.values()) }
+  }
+  if (!on) return
+  ps.forEach((p, i) => {
+    const el = paneEls.get(p.id); const r = rs[i]; const at = (c) => el.querySelector(c)
+    Object.assign(el.style, { left: px(r.x), top: px(r.y), width: px(r.width), height: px(r.height) })
+    el.classList.toggle('active', p.id === S.activeTabId)
+    at('.back').disabled = !p.canBack; at('.fwd').disabled = !p.canFwd
+    setIcon(at('.reload'), p.loading ? 'stop' : 'reload'); at('.reload').title = p.loading ? 'Stop' : 'Reload'
+    at('.purl span').textContent = p.url ? bare(p.url) : 'Search or enter URL…'
+    at('.purl').title = `${p.title}\n${p.url}`
+  })
+}
+
+// Outline the focused pane and put draggable dividers in the gaps between panes
 api.on('layout', ({ panes, dir }) => {
-  const box = $('#panes'); box.replaceChildren()
+  const box = $('#panes'); box.querySelectorAll('.pane-ring,.divider-h').forEach(e => e.remove())
+  paneRects = panes; syncPanes()
   if (!panes) return
-  const px = (n) => n + 'px'
   panes.forEach((p, i) => {
     const ring = document.createElement('div'); ring.className = 'pane-ring' + (p.active ? ' active' : '')
     Object.assign(ring.style, { left: px(p.x - 2), top: px(p.y - 2), width: px(p.width + 4), height: px(p.height + 4) })
@@ -353,6 +434,30 @@ $('#resizer').onmousedown = (e) => {
   e.preventDefault(); api.send('sidebar-resize-start')
   follow((ev) => api.send('sidebar-width', ev.clientX))
 }
+
+// Two-finger swipe across the sidebar steps through the spaces (Arc): the lists follow your fingers, slide
+// out past the threshold and come back in from the other side; let go early and they spring back
+let swipeX = 0; let swipeDone = false; let swipeIdle = 0
+function swipeShift (x, ms) {
+  for (const el of [$('#favorites'), $('#scroll')]) {
+    el.style.transition = ms ? `transform ${ms}ms ease-out, opacity ${ms}ms ease-out` : 'none'
+    el.style.transform = x ? `translateX(${x}px)` : ''
+    el.style.opacity = x ? String(Math.max(0, 1 - Math.abs(x) / 160)) : ''
+  }
+}
+$('#sidebar').addEventListener('wheel', (e) => {
+  if (!S || S.spaces.length < 2 || e.ctrlKey || !e.deltaX || Math.abs(e.deltaX) < Math.abs(e.deltaY) * 2) return
+  clearTimeout(swipeIdle)
+  swipeIdle = setTimeout(() => { if (!swipeDone) swipeShift(0, 200); swipeX = 0; swipeDone = false }, 160)
+  if (swipeDone) return // one switch per gesture, momentum included
+  swipeX += e.deltaX
+  const dir = Math.sign(swipeX); const room = !!S.spaces[S.spaces.findIndex(s => s.id === S.activeSpaceId) + dir]
+  // no wrap-around: at either end the lists only stretch a little
+  if (!room || Math.abs(swipeX) < 90) return swipeShift(-(room ? swipeX * 0.6 : dir * Math.min(40, Math.abs(swipeX) * 0.15)), 0)
+  swipeDone = true; api.send('step-space', dir)
+  swipeShift(-dir * 130, 180)
+  setTimeout(() => { swipeShift(dir * 60, 0); $('#scroll').getBoundingClientRect(); swipeShift(0, 220) }, 180)
+}, { passive: true })
 
 setupDropzones()
 api.send('ready')

@@ -427,6 +427,69 @@ module.exports = (D) => {
       const kept = await D.win.webContents.executeJavaScript("window.__keep === document.querySelectorAll('#today .row')[0] && document.querySelectorAll('#today .row')[1].textContent.includes('Renamed for test')")
       ok('sidebar redraw keeps unchanged rows (no blinking favicons, no lost clicks)', kept)
       delete D.tab(second).customTitle; D.ACTIONS.ready(); await wait(200)
+      // ---- history: Back/Forward survive an unload, failed loads don't trap Back, Reload retries, two-finger swipe
+      const hid = D.newTab('https://nodejs.org/en/about'); await wait(3000)
+      D.views.get(hid).webContents.loadURL('https://nodejs.org/en/download').catch(() => {}); await wait(3000)
+      D.destroyView(hid); D.activateTab(hid); await wait(3500)
+      const hwc = D.views.get(hid).webContents
+      const restored = [hwc.navigationHistory.canGoBack(), hwc.getURL()]
+      await D.win.webContents.executeJavaScript("document.getElementById('b-back').click()"); await wait(3000)
+      ok('history: back/forward survive unloading a tab', restored[0] && restored[1].includes('/download') && hwc.getURL().includes('/about'), `${restored[1]} (can go back: ${restored[0]}) → ${hwc.getURL()}`)
+      hwc.loadURL('https://drift-test.invalid/').catch(() => {}); await wait(3000)
+      const errUrl = hwc.getURL(); const rawKept = hwc.navigationHistory.getAllEntries().some(e => e.url === 'https://drift-test.invalid/')
+      D.ACTIONS.back(); await wait(3000)
+      ok("history: a failed load doesn't trap Back", errUrl.startsWith('data:') && !rawKept && hwc.getURL().includes('nodejs.org/en/about'), `${errUrl.slice(0, 16)}… raw entry kept: ${rawKept} → ${hwc.getURL()}`)
+      D.ACTIONS.forward(); await wait(2500)
+      const hn = hwc.navigationHistory.length()
+      D.ACTIONS.reload(); await wait(3000)
+      ok('reload on an error page retries without growing history', hwc.getURL().startsWith('data:') && hwc.navigationHistory.length() === hn, `${hn} → ${hwc.navigationHistory.length()} entries, ${hwc.getURL().slice(0, 16)}…`)
+      hwc.loadURL('https://nodejs.org/en/about').catch(() => {}); await wait(3000)
+      hwc.loadURL('https://nodejs.org/en/blog').catch(() => {}); await wait(3000)
+      for (let i = 0; i < 10; i++) { hwc.sendInputEvent({ type: 'mouseWheel', x: 300, y: 300, deltaX: 40, deltaY: 0, canScroll: true, hasPreciseScrollingDeltas: true }); await wait(16) }
+      await wait(3000)
+      ok('two-finger swipe goes back', hwc.getURL().includes('/en/about'), hwc.getURL())
+      // ---- ⌘L: Enter opens what was typed even with the pointer resting over a result row
+      const lid = D.space().activeTabId
+      D.commandBar('edit'); await wait(800)
+      const rowAt = await D.overlay.webContents.executeJavaScript("(() => { const r = [...document.querySelectorAll('.r')]; const b = (r[2] || r[r.length - 1])?.getBoundingClientRect(); return b && { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2) } })()")
+      if (rowAt) for (let i = 0; i < 2; i++) D.overlay.webContents.sendInputEvent({ type: 'mouseMove', ...rowAt })
+      await wait(200)
+      for (const ch of 'nodejs.org/en/learn') { D.overlay.webContents.sendInputEvent({ type: 'char', keyCode: ch }); await wait(20) }
+      await wait(300)
+      for (const type of ['keyDown', 'char', 'keyUp']) D.overlay.webContents.sendInputEvent({ type, keyCode: type === 'char' ? '\r' : 'Return' })
+      await wait(3500)
+      const lnow = D.space().activeTabId
+      ok('⌘L: Enter opens what you typed, not the row under the pointer', lnow === lid && (D.tab(lnow)?.url || '').includes('/en/learn'), `${lnow === lid ? '' : 'active tab changed; '}${D.tab(lnow)?.url}`)
+      if (D.overlayOpen) D.closeOverlay()
+      // ---- split view: a toolbar on every pane, one combined row in the sidebar
+      D.openSplit('https://nodejs.org/en/download'); await wait(3500); await shot('23-split-toolbars')
+      const sids = [...(D.space().split?.ids || [])]
+      const labels = await D.win.webContents.executeJavaScript("[...document.querySelectorAll('.pane .pbar')].map(b => b.querySelector('.purl').textContent)")
+      const ys = sids.map((id, i) => [D.views.get(id)?.getBounds().y, D.lastLayout.rects[i]?.y + 36])
+      ok('split view: each pane has its own toolbar', labels.length === 2 && labels.every(l => l.includes('nodejs.org')) && sids.length === 2 && ys.every(([got, want]) => got === want), `${labels.join(' | ')}; page y/expected ${ys.map(y => y.join('/')).join(' ')}`)
+      const rowInfo = await D.win.webContents.executeJavaScript("document.querySelectorAll('.splitrow').length + '|' + document.querySelectorAll('.splitrow .half').length")
+      const clickHalf = (n) => D.win.webContents.executeJavaScript(`document.querySelectorAll('.splitrow .half')[${n}].click()`)
+      await clickHalf(0); await wait(400); const onFirst = D.space().activeTabId
+      await clickHalf(1); await wait(400)
+      ok('split view: combined sidebar row', rowInfo === '1|2' && onFirst === sids[0] && D.space().activeTabId === sids[1], `${rowInfo}; clicked halves → ${onFirst}, ${D.space().activeTabId}; split ${sids.join(',')}`)
+      await D.win.webContents.executeJavaScript("document.querySelectorAll('.pane')[1].querySelector('.pb.x').click()"); await wait(600)
+      const barsLeft = await D.win.webContents.executeJavaScript("document.querySelectorAll('.pane .pbar').length")
+      ok('split view: pane buttons work', !D.space().split && barsLeft === 0, `split=${JSON.stringify(D.space().split)} toolbars=${barsLeft}`)
+      // ---- two-finger swipe across the sidebar steps through the spaces
+      const spBefore = D.S.activeSpaceId
+      if (D.S.spaces.length < 2) { D.createSpace('Swipe test'); await wait(300) }
+      const [sp0, sp1] = D.S.spaces.map(s => s.id)
+      D.switchSpace(sp0); await wait(800)
+      const swipeSidebar = async (dx) => {
+        await D.win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 6; i++) { document.getElementById('sidebar').dispatchEvent(new WheelEvent('wheel', { deltaX: ${dx}, deltaY: 0, bubbles: true })); await new Promise(r => setTimeout(r, 16)) } })()`)
+        await wait(800)
+      }
+      await swipeSidebar(30); const onNext = D.S.activeSpaceId
+      await swipeSidebar(-30); const onPrev = D.S.activeSpaceId
+      D.ACTIONS['step-space'](-1); await wait(300)
+      ok('swipe on the sidebar switches spaces', onNext === sp1 && onPrev === sp0 && D.S.activeSpaceId === sp0, `${sp0} → ${onNext} → ${onPrev} → ${D.S.activeSpaceId}`)
+      D.switchSpace(spBefore); await wait(500)
+      D.closeTab(sids[1]); D.closeTab(hid)
     } catch (e) { ok('exception', false, e.stack) }
     fs.writeFileSync(path.join(out, 'results.txt'), log.join('\n'))
     D.app.exit(0)

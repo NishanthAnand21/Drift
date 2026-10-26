@@ -958,6 +958,9 @@ function openSplit (urlOrTabId) {
     sp.today.splice(Math.max(0, sp.today.indexOf(base) + 1), 0, other)
   }
   if (other === base) return
+  // keep a split's tabs next to each other: the sidebar shows them as one row (like Arc)
+  const list = [sp.today, sp.pinned].find(l => l.includes(base) && l.includes(other))
+  if (list) { list.splice(list.indexOf(other), 1); list.splice(list.indexOf(base) + 1, 0, other) }
   const ids = sp.split ? [...sp.split.ids] : [base]
   ids.splice(ids.indexOf(base) + 1, 0, other)
   sp.split = { ids, dir: sp.split?.dir || 'row', sizes: ids.map(() => 1 / ids.length) }
