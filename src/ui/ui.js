@@ -144,7 +144,8 @@ function bindTab (el, t) {
   el.ondragend = () => { dragId = null; el.classList.remove('dragging'); clearDrop(); if (pendingRender) render() }
 }
 
-function folderRow (f) {
+// A folder in Pinned or in Today (made by Tidy); zone says how its tabs behave (× closes in Today, unloads in Pinned)
+function folderRow (f, zone) {
   const wrap = document.createElement('div'); wrap.className = 'folder' + (f.open ? ' open' : '')
   const head = document.createElement('div'); head.className = 'row frow'; head.dataset.folder = f.id; head.draggable = true
   const chev = document.createElement('span'); chev.className = 'chev'; chev.append(svg('chevron'))
@@ -152,18 +153,18 @@ function folderRow (f) {
   const name = document.createElement('span'); name.className = 't'; name.textContent = f.name; head.append(name)
   head.onclick = () => api.send('toggle-folder', f.id)
   head.oncontextmenu = (e) => { e.preventDefault(); api.send('folder-menu', f.id) }
-  head.ondragstart = (e) => { dragFolder = f.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', f.name) }
+  head.ondragstart = (e) => { dragFolder = f.id; dragFolderZone = zone; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', f.name) }
   head.ondragend = () => { dragFolder = null; clearDrop(); if (pendingRender) render() }
   // dropping a tab on the folder header puts it inside
   head.ondragover = (e) => { if (dragId) { e.preventDefault(); e.stopPropagation(); clearDrop(); head.classList.add('over') } }
   head.ondrop = (e) => { e.preventDefault(); e.stopPropagation(); if (dragId) api.send('move', dragId, 'folder', -1, null, f.id); dragId = null; clearDrop() }
   const kids = document.createElement('div'); kids.className = 'kids dropzone'; kids.dataset.zone = 'folder'; kids.dataset.folder = f.id
-  if (f.open) kids.append(...f.items.map(t => tabRow(t, 'pinned')))
+  if (f.open) kids.append(...f.items.map(t => tabRow(t, zone)))
   bindZone(kids)
   wrap.append(head, kids)
   return wrap
 }
-let dragFolder = null
+let dragFolder = null; let dragFolderZone = null // a folder only reorders within its own list
 
 // Keyed redraw: an entry whose data didn't change keeps its element, so favicons don't blink, hover
 // controls stay put and a click that lands in the middle of an update isn't lost (the row under the
@@ -191,7 +192,7 @@ const keysOf = (n) => n.dataset.ids ? n.dataset.ids.split(',') : [n.dataset.id |
 
 function bindZone (z) {
     z.ondragover = (e) => {
-      if (dragFolder && z.dataset.zone === 'pinned') { e.preventDefault(); clearDrop(); z.classList.add('over'); return }
+      if (dragFolder && z.dataset.zone === dragFolderZone) { e.preventDefault(); clearDrop(); z.classList.add('over'); return }
       if (!dragId) return
       e.preventDefault(); clearDrop(); z.classList.add('over')
       const target = e.target.closest('.splitrow') || e.target.closest('[data-id]'); if (target && !keysOf(target).includes(dragId)) target.classList.add('drop-before')
@@ -204,7 +205,7 @@ function bindZone (z) {
       const target = [...own].find(n => n.contains(e.target))
       if (dragFolder) {
         const ids = own.flatMap(keysOf).filter(k => k !== dragFolder)
-        api.send('move-folder', dragFolder, target ? Math.max(0, ids.indexOf(keysOf(target)[0])) : ids.length)
+        if (z.dataset.zone === dragFolderZone) api.send('move-folder', dragFolder, target ? Math.max(0, ids.indexOf(keysOf(target)[0])) : ids.length)
         dragFolder = null; clearDrop(); return
       }
       if (!dragId) return
@@ -243,7 +244,7 @@ function render () {
   setIcon($('#b-reload'), S.nav.loading ? 'stop' : 'reload')
   $('#url-text').textContent = S.nav.url ? host(S.nav.url) : 'Search or enter URL…'
   $('#blocked').textContent = S.nav.blocked ? String(S.nav.blocked) : ''
-  document.body.classList.toggle('tidy', !!S.tidyTabs && S.today.length > 6)
+  document.body.classList.toggle('tidy', !!S.canTidy)
   document.body.classList.toggle('chat', !!S.chatOpen)
   document.body.classList.toggle('dim-unloaded', S.dimUnloaded !== false)
   document.body.classList.toggle('no-pin-reset', S.pinnedResetButton === false)
@@ -256,8 +257,10 @@ function render () {
   $('#space-head').ondblclick = () => api.send('space-edit', sp.id)
   patch($('#pinned'), groupSplit(S.pinned), rowKey,
     t => t.folder ? JSON.stringify([t, S.activeTabId, S.split?.ids, S.pinnedResetButton]) : tabSig(t, 'pinned'),
-    t => t.folder ? folderRow(t) : rowEl(t, 'pinned'))
-  patch($('#today'), groupSplit(S.today), rowKey, t => tabSig(t, 'today'), t => rowEl(t, 'today'))
+    t => t.folder ? folderRow(t, 'pinned') : rowEl(t, 'pinned'))
+  patch($('#today'), groupSplit(S.today), rowKey,
+    t => t.folder ? JSON.stringify([t, S.activeTabId, S.split?.ids]) : tabSig(t, 'today'),
+    t => t.folder ? folderRow(t, 'today') : rowEl(t, 'today'))
 
   patch($('#spaces'), S.spaces, s => s.id, s => JSON.stringify([s.id, s.name, s.icon, s.profile, s.id === S.activeSpaceId]), s => {
     const b = document.createElement('button'); b.className = 'sp' + (s.id === S.activeSpaceId ? ' active' : '')

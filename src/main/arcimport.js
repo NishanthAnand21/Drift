@@ -56,7 +56,7 @@ function cleanText (v, max) {
     const c = s.charCodeAt(i)
     out += (c < 32 || (c >= 127 && c < 160) || c === 0x2028 || c === 0x2029) ? ' ' : s[i]
   }
-  out = out.trim().slice(0, max)
+  out = out.replace(/ {2,}/g, ' ').trim().slice(0, max)
   const last = out.charCodeAt(out.length - 1)
   if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1) // do not leave half a surrogate pair
   return out.trim()

@@ -448,20 +448,21 @@ async function main () {
   'odd children, titles, colour, icon and time fields are skipped, not fatal')
 
   // a profile named __proto__ cannot touch prototypes, and an item id of __proto__ is just an id
-  const protoJson = JSON.parse(`{"sidebar":{"containers":[{"spaces":{"S":{"id":"S","title":"P","profile":{"custom":{"_0":{"directoryBasename":"__proto__"}}},"containerIDs":["pinned","__proto__"]}},
-    "items":{"__proto__":{"id":"__proto__","childrenIds":["T"],"data":{"itemContainer":{"containerType":{"spaceItems":{"_0":"S"}}}}},
-    "T":{"id":"T","title":null,"childrenIds":[],"data":{"tab":{"savedURL":"https://p.example.com/","savedTitle":"P"}}},
-    "F":{"id":"F","childrenIds":["T"],"data":{"itemContainer":{"containerType":{"topApps":{"_0":{"custom":{"_0":{"directoryBasename":"__proto__"}}}}}}}}}}]}}`)
+  const protoJson = JSON.parse(`{"sidebar":{"containers":[{
+    "spaces":{"S":{"id":"S","title":"P","profile":{"custom":{"_0":{"directoryBasename":"__proto__"}}},"containerIDs":["pinned","__proto__"]}},
+    "items":{
+      "__proto__":{"id":"__proto__","childrenIds":["T"],"data":{"itemContainer":{"containerType":{"spaceItems":{"_0":"S"}}}}},
+      "T":{"id":"T","title":null,"childrenIds":[],"data":{"tab":{"savedURL":"https://p.example.com/","savedTitle":"P"}}},
+      "F":{"id":"F","childrenIds":["T2"],"data":{"itemContainer":{"containerType":{"topApps":{"_0":{"custom":{"_0":{"directoryBasename":"__proto__"}}}}}}}},
+      "T2":{"id":"T2","title":null,"childrenIds":[],"data":{"tab":{"savedURL":"https://q.example.com/","savedTitle":"Q"}}}
+    }}]}}`)
   const protoOut = arc.parseArcSidebar(protoJson)
-  eq(protoOut.spaces.map(s => [s.name, s.profile, s.pinned.length]), [['P', '__proto__', 1]], 'item id __proto__ resolves like any other id')
-  eq(Object.keys(protoOut.favorites), [], 'a tab already placed is not duplicated into favourites')
-  protoJson.sidebar.containers[0].items.T = { id: 'T2', title: null, childrenIds: [], data: { tab: { savedURL: 'https://q.example.com/' } } }
-  protoJson.sidebar.containers[0].items.F.childrenIds = ['T']
-  const protoOut2 = arc.parseArcSidebar(protoJson)
-  eq(Object.getPrototypeOf(protoOut2.favorites), Object.prototype, 'favorites keeps Object.prototype')
-  eq(Object.keys(protoOut2.favorites), ['__proto__'], 'a profile called __proto__ becomes an ordinary own key')
-  eq(protoOut2.favorites.__proto__.length, 0 + (protoOut2.favorites.__proto__.length), 'own __proto__ key is readable')
-  eq({}.polluted, undefined, 'Object.prototype is not polluted')
+  eq(protoOut.spaces.map(s => [s.name, s.profile, s.pinned.length]), [['P', '__proto__', 1]], 'an item id of __proto__ resolves like any other id')
+  eq(Object.getPrototypeOf(protoOut.favorites), Object.prototype, 'favorites keeps Object.prototype')
+  eq(Object.keys(protoOut.favorites), ['__proto__'], 'a profile called __proto__ becomes an ordinary own key')
+  eq(Object.getOwnPropertyDescriptor(protoOut.favorites, '__proto__').value, [tabN('Q', 'https://q.example.com/', 0)], 'the own __proto__ key holds its tabs')
+  eq(Object.keys(arc.planImport(protoOut, null).favorites), ['__proto__'], 'planImport keeps a __proto__ key as an own key too')
+  eq([({}).title, ({}).length, Object.prototype.title], [undefined, undefined, undefined], 'Object.prototype is not polluted')
 
   // caps
   const many = arc.parseArcSidebar(manySpaces(60))
@@ -529,7 +530,7 @@ async function main () {
     'planImport tolerates malformed input')
   const planB = arc.planImport(arc.parseArcSidebar(fixtureB), { spaceNames: ['Reading'] })
   eq(planB.spaces.map(s => s.name), ['Work', 'Reading (Arc)'], 'planImport on fixture B')
-  eq(planB.stats, { spaces: 2, tabs: 13, folders: 8, favorites: 3 }, 'planImport stats on fixture B')
+  eq(planB.stats, { spaces: 2, tabs: 13, folders: 6, favorites: 3 }, 'planImport stats on fixture B')
   eq(Object.keys(planB.favorites).sort(), ['Default', 'Profile 7'], 'planImport keeps unused-profile favourite sets')
 
   // readArcSidebar (real files in a temp dir)

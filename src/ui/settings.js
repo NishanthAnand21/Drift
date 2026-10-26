@@ -44,6 +44,15 @@ function select (key, t, options, sub) {
   return el('div', { class: 'row' }, label(t, sub), s)
 }
 function button (t, sub, btn, fn, cls = '') { return el('div', { class: 'row' }, label(t, sub), el('button', { class: 'b ' + cls, onclick: fn }, btn)) }
+// Updates: the version line, a status line under it, and one button that follows the state (check → download / restart)
+function updatesRow () {
+  const u = D.update || {}; const v = u.version
+  const status = { checking: 'Checking…', latest: 'Drift is up to date', available: `Drift ${v} is available`, downloading: `Downloading… ${u.percent || 0}%`, ready: 'Update ready — restart to install', error: u.message }[u.status]
+  const [text, name] = u.status === 'available' ? ['Download', 'update-download'] : u.status === 'ready' ? ['Restart', 'update-restart'] : ['Check Now', 'check-updates']
+  const b = el('button', { class: 'b', onclick: () => act(name) }, u.status === 'checking' ? 'Checking…' : text)
+  b.disabled = u.status === 'checking'
+  return el('div', { class: 'row' }, el('div', { class: 'lbl' }, 'Updates', el('small', {}, `Drift ${D.version} · Chromium ${D.chrome}`), status ? el('small', {}, status) : null), b)
+}
 const card = (...rows) => el('div', { class: 'card' }, ...rows)
 const sec = (t) => el('div', { class: 'sec' }, t)
 const note = (t) => el('p', { class: 'note' }, t)
@@ -53,7 +62,7 @@ const render = {
     card(toggle('autoUpdate', 'Automatically update Drift', 'Includes Chromium security fixes'), toggle('warnBeforeQuit', 'Warn before quitting', 'Press ⌘Q twice to quit')),
     card(toggle('restoreSession', 'Restore tabs from the previous session'),
       button('Default browser', 'Open links from other apps in Drift', 'Make Default', () => act('default-browser')),
-      button('Updates', `Drift ${D.version} · Chromium ${D.chrome}`, 'Check Now', () => act('check-updates')))
+      updatesRow())
   ],
   profiles: () => [
     note('Profiles keep data separate across Spaces — history, logins, cookies and extensions. A profile can be used by one or more Spaces.'),
@@ -80,7 +89,7 @@ const render = {
   ],
   tidy: () => [
     note('Tidy features run entirely on your Mac — nothing is sent to an AI service.'),
-    card(toggle('tidyTabs', 'Tidy Tabs', 'Shows a ✧ Tidy button when you have more than six Today tabs: groups them by site and archives duplicates'),
+    card(toggle('tidyTabs', 'Tidy Tabs', 'Shows a ✧ Tidy button when Today has several tabs from one site or duplicates: groups each site into a folder and archives duplicates'),
       toggle('instantLinks', 'Instant Links', 'Press Shift+Enter on a search to open the top result directly. Separate queries with commas to open several'),
       toggle('tidyTitles', 'Tidy Tab Titles', 'Shorter, cleaner titles when you pin a tab (double-click a tab to rename it)'),
       toggle('tidyDownloads', 'Tidy Downloads', 'Renames downloads with meaningless names (e.g. 387494875.pdf) after the page they came from'),

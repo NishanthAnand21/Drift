@@ -26,6 +26,7 @@ function decrypt (text, passphrase) {
 
 // Pure merge of browser structure. `local` is the live state (mutated), `remote` a device payload.
 const flatPinned = (S, sp) => sp.pinned.flatMap(id => S.folders?.[id] ? S.folders[id].items : [id])
+const flatToday = (S, sp) => sp.today.flatMap(id => S.folders?.[id] ? S.folders[id].items : [id]) // Today folders hold tabs too
 function mergeState (S, remote, newTabId) {
   let changed = false
   S.sync.tombstones = S.sync.tombstones || {}
@@ -33,7 +34,8 @@ function mergeState (S, remote, newTabId) {
     S.sync.tombstones[id] = Math.max(S.sync.tombstones[id] || 0, t)
     const sp = S.spaces.find(s => s.id === id)
     if (sp && (sp.updatedAt || 0) <= t && S.spaces.length > 1) {
-      for (const tid of [...flatPinned(S, sp), ...sp.today]) delete S.tabs[tid]
+      for (const tid of [...flatPinned(S, sp), ...flatToday(S, sp)]) delete S.tabs[tid]
+      for (const fid of [...sp.pinned, ...sp.today]) delete S.folders?.[fid]
       S.spaces = S.spaces.filter(s => s !== sp); changed = true
       if (S.activeSpaceId === id) S.activeSpaceId = S.spaces[0].id
     }

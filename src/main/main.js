@@ -2351,6 +2351,7 @@ function settingsData () {
     settings: S.settings,
     version: app.getVersion(),
     chrome: process.versions.chrome,
+    update: upd,
     engines: Object.entries(ENGINES).map(([k, e]) => [k, e.name]),
     profiles: S.profiles.map(p => ({ id: p.id, name: p.name, spaces: spacesPer(p.id) })),
     permissions: perms,
@@ -2405,6 +2406,8 @@ async function setSetting (key, value) {
 const SETTINGS_ACTIONS = {
   'default-browser': () => runCommand('default-browser'),
   'check-updates': () => checkForUpdates(true),
+  'update-download': () => downloadUpdate(),
+  'update-restart': () => { if (autoUpdater && upd.status === 'ready') { store.saveNow(); autoUpdater.quitAndInstall() } },
   'profile-add': () => { win.focus(); prompt('New profile name', '', (n) => { if (n) { S.profiles.push({ id: uid('p'), name: n, favorites: [] }); store.save(); sendSettings() } }) },
   'profile-rename': (id) => { const p = profile(id); if (!p) return; win.focus(); prompt('Rename profile', p.name, (n) => { if (n) { p.name = n; store.save(); sendSettings(); pushState() } }) },
   'profile-delete': async (id) => {
@@ -2945,23 +2948,71 @@ function stepTab (dir) {
 }
 
 // ---------------------------------------------------------------- updates
-let autoUpdater = null
-function checkForUpdates (manual = false) {
-  if (!app.isPackaged) { if (manual) toast('Updates are checked in packaged builds only'); return }
+// Release builds are ad-hoc signed (no Developer ID), so Squirrel.Mac can't install an update in place:
+// those offer the new DMG instead (downloadUpdate). Properly signed builds download and install by themselves.
+let autoUpdater = null; let manualCheck = false; let updateInfo = null; let adhocBuild = null
+const upd = { status: 'idle', version: null, percent: 0, message: '' } // shown in Settings → General
+function setUpdate (patch) { Object.assign(upd, patch); sendSettings() }
+const updateBox = (o) => (win && !win.isDestroyed() ? dialog.showMessageBox(win, o) : dialog.showMessageBox(o))
+const isAdhocBuild = () => adhocBuild || (adhocBuild = new Promise(resolve => {
+  if (!isMac || !app.isPackaged) return resolve(false)
+  execFile('/usr/bin/codesign', ['-dv', path.resolve(path.dirname(app.getPath('exe')), '..', '..')], { timeout: 8000 }, (_e, _out, stderr) => {
+    const s = String(stderr || ''); resolve(/Signature=adhoc/.test(s) || !/TeamIdentifier=(?!not set)\S/.test(s))
+  })
+}))
+// The DMG for this Mac from the update feed, opened as a download (the download manager takes it); never leaves github.com
+function downloadUpdate (info = updateInfo) {
+  if (!info) return checkForUpdates(true)
+  const { owner, repo } = require('../../package.json').build.publish[0]
+  const v = String(info.version).replace(/[^\w.+-]/g, ''); const arm = process.arch === 'arm64'
+  const dmg = (info.files || []).map(f => path.posix.basename(String(f?.url || '').split('?')[0])).find(n => /^[\w. +()-]+\.dmg$/i.test(n) && /arm64/.test(n) === arm)
+  const base = `https://github.com/${owner}/${repo}/releases`
+  win?.focus()
+  newTab(dmg ? `${base}/download/v${v}/${encodeURIComponent(dmg)}` : `${base}/tag/v${v}`)
+}
+function offerDownload (info) {
+  if (!manualCheck && S.updateOffered === info.version) return // silent checks ask once per version
+  S.updateOffered = info.version; store.save()
+  updateBox({ type: 'info', buttons: ['Download', 'Later'], defaultId: 0, cancelId: 1, message: `Drift ${info.version} is available`, detail: "This copy of Drift isn't signed with an Apple Developer ID, so it can't install updates by itself. Download the new version, then drag it to Applications." })
+    .then(({ response }) => { if (response === 0) downloadUpdate(info) })
+}
+function offerRestart (info) {
+  updateBox({ type: 'info', buttons: ['Restart Now', 'Later'], message: `Drift ${info.version} is ready`, detail: 'Restart to apply the update (includes the latest Chromium security fixes).' })
+    .then(({ response }) => { if (response === 0) { store.saveNow(); autoUpdater.quitAndInstall() } })
+}
+function updateFailed (e) {
+  const message = String(e?.message || e || 'Update failed').split('\n')[0].slice(0, 200)
+  if (/code signature|did not pass validation/i.test(message) && updateInfo) { setUpdate({ status: 'available', version: updateInfo.version, message: '' }); return offerDownload(updateInfo) }
+  setUpdate({ status: 'error', message })
+  if (manualCheck) toast('Update check failed: ' + message)
+}
+async function checkForUpdates (manual = false) {
+  if (!app.isPackaged) { setUpdate({ status: 'error', message: 'Updates are checked in packaged builds only' }); if (manual) toast(upd.message); return }
+  if (upd.status === 'ready') return manual && offerRestart(upd)
+  if (upd.status === 'downloading') return manual && toast(`Downloading Drift ${upd.version}…`)
+  manualCheck = manual
+  setUpdate({ status: 'checking', message: '' })
   try {
     if (!autoUpdater) {
+      const adhoc = await isAdhocBuild()
       autoUpdater = require('electron-updater').autoUpdater
-      autoUpdater.autoDownload = true
-      autoUpdater.autoInstallOnAppQuit = true
-      autoUpdater.on('update-downloaded', (info) => {
-        dialog.showMessageBox(win, { type: 'info', buttons: ['Restart Now', 'Later'], message: `Drift ${info.version} is ready`, detail: 'Restart to apply the update (includes the latest Chromium security fixes).' })
-          .then(({ response }) => { if (response === 0) { store.saveNow(); autoUpdater.quitAndInstall() } })
+      autoUpdater.autoDownload = !adhoc
+      autoUpdater.autoInstallOnAppQuit = !adhoc
+      autoUpdater.on('update-available', async (info) => {
+        updateInfo = info
+        const a = await isAdhocBuild()
+        setUpdate({ status: a ? 'available' : 'downloading', version: info.version, percent: 0, message: '' })
+        if (a) offerDownload(info)
       })
-      autoUpdater.on('update-not-available', () => manual && toast('Drift is up to date'))
-      autoUpdater.on('error', (e) => manual && toast('Update check failed: ' + e.message))
+      autoUpdater.on('download-progress', (p) => { const percent = Math.round(p.percent || 0); if (percent !== upd.percent) setUpdate({ percent }) })
+      autoUpdater.on('update-downloaded', (info) => { setUpdate({ status: 'ready', version: info.version }); offerRestart(info) })
+      autoUpdater.on('update-not-available', () => { setUpdate({ status: 'latest', version: app.getVersion(), message: '' }); if (manualCheck) toast('Drift is up to date') })
+      autoUpdater.on('error', updateFailed)
     }
-    autoUpdater.checkForUpdates()
-  } catch (e) { if (manual) toast('Update check failed') }
+    const r = await autoUpdater.checkForUpdates()
+    r?.downloadPromise?.catch(() => {}) // failures arrive as 'error' events
+    if (!r) setUpdate({ status: 'error', message: 'Updates aren’t available in this build' })
+  } catch (e) { if (upd.status === 'checking') updateFailed(e) }
 }
 
 // ---------------------------------------------------------------- window
@@ -2998,7 +3049,7 @@ function createWindow () {
   }, 250))
   win.on('focus', () => { if (pip?.auto && pip.tabId === activeTabId()) returnVideo(pip.tabId) })
   win.on('closed', () => { for (const m of miniWindows) m.win.close() })
-  win.on('closed', () => { win = null; overlay = null; sidebarFloat = null; floatAttached = false; toastView = null; toastShown = false; views.clear(); wcToTab.clear(); live.clear() })
+  win.on('closed', () => { win = null; overlay = null; sidebarFloat = null; floatAttached = false; toastView = null; toastShown = false; clearTimeout(noticeTimer); clearTimeout(noticeDetachTimer); noticeView = null; noticeShown = false; noticeTab = null; views.clear(); wcToTab.clear(); live.clear() })
   // restore the active tab
   const sp = space()
   if (sp.activeTabId && tab(sp.activeTabId)) ensureView(sp.activeTabId)
@@ -3011,14 +3062,17 @@ function sanitizeState () {
   S.folders = S.folders && typeof S.folders === 'object' ? S.folders : {}
   const clean = (list) => list.filter(id => S.tabs[id] && !seen.has(id) && seen.add(id))
   for (const p of S.profiles) p.favorites = clean(p.favorites || [])
+  // a list holds tab ids and folder ids (Pinned and Today alike); a Today folder with nothing left in it goes
+  const keep = (id) => {
+    const f = S.folders[id]
+    if (!f) return S.tabs[id] && !seen.has(id) && seen.add(id)
+    if (seen.has(id)) return false
+    seen.add(id); f.items = clean(f.items || []); return true
+  }
   for (const sp of S.spaces) {
-    sp.pinned = (sp.pinned || []).filter(id => {
-      const f = S.folders[id]
-      if (!f) return S.tabs[id] && !seen.has(id) && seen.add(id)
-      if (seen.has(id)) return false
-      seen.add(id); f.items = clean(f.items || []); return true
-    })
-    sp.today = clean(sp.today || [])
+    sp.pinned = (sp.pinned || []).filter(keep)
+    sp.today = (sp.today || []).filter(keep)
+    pruneToday(sp)
     if (!profile(sp.profileId)) sp.profileId = 'default'
     sp.theme = cleanTheme(sp.theme || defaultTheme(sp.color), sp.color); sp.color = sp.theme.colors[0]
     if (typeof sp.icon !== 'string') sp.icon = ''
@@ -3075,7 +3129,7 @@ app.whenReady().then(() => {
     }
   }
   if (!S.settings.restoreSession && !PRIVATE) {
-    for (const sp of S.spaces) { for (const id of sp.today) { archiveEntry(S.tabs[id], sp.id); delete S.tabs[id] } sp.today = []; sp.split = null }
+    for (const sp of S.spaces) { for (const id of todayTabs(sp)) { archiveEntry(S.tabs[id], sp.id); delete S.tabs[id] } for (const id of sp.today) delete S.folders[id]; sp.today = []; sp.split = null }
     sanitizeState()
   }
   safebrowsing.start(app.getPath('userData')).then(() => console.log('threat feeds:', safebrowsing.size))
@@ -3110,4 +3164,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek, get dragShield () { return dragShield }, get dragMode () { return dragMode }, restack, toast, get toastView () { return toastView }, destroyView, pipLinger })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek, get dragShield () { return dragShield }, get dragMode () { return dragMode }, restack, toast, get toastView () { return toastView }, destroyView, pipLinger, todayTabs, sanitizeState, checkForUpdates, get upd () { return upd }, get noticeView () { return noticeView }, get noticeShown () { return noticeShown } })

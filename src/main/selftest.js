@@ -89,11 +89,11 @@ module.exports = (D) => {
       ok('tidy titles', D.tidyTitle('(3) Pull requests · electron/electron · GitHub', 'https://github.com/x') === 'Pull requests – electron/electron', D.tidyTitle('(3) Pull requests · electron/electron · GitHub', 'https://github.com/x'))
       ok('tidy downloads', D.tidyDownloadName('387494875.pdf', 'Navan Itinerary | Navan') === 'Navan Itinerary.pdf' && D.tidyDownloadName('report-q3.pdf', 'x') === null)
       for (const u of ['https://nodejs.org/en/about', 'https://registry.npmjs.org/', 'https://nodejs.org/en/about', 'https://nodejs.org/en/blog', 'https://registry.npmjs.org/electron', 'https://nodejs.org/en/learn', 'https://registry.npmjs.org/react']) D.newTab(u, { activate: false })
-      const nToday = D.space().today.length; D.tidyTabs()
-      ok('tidy tabs (dedupe + group by site)', D.space().today.length === nToday - 1, `${nToday} → ${D.space().today.length}`)
+      const nToday = D.todayTabs(D.space()).length; D.tidyTabs()
+      ok('tidy tabs (dedupe + group by site)', D.todayTabs(D.space()).length === nToday - 1 && D.space().today.some(id => D.S.folders[id]), `${nToday} → ${D.todayTabs(D.space()).length} tabs, ${D.space().today.filter(id => D.S.folders[id]).length} groups`)
       // ---- Memory Saver
       const loadedBefore = D.views.size
-      for (const id of D.space().today) if (id !== D.space().activeTabId && D.tab(id)) D.tab(id).lastActiveAt = Date.now() - 2 * 3600e3
+      for (const id of D.todayTabs(D.space())) if (id !== D.space().activeTabId && D.tab(id)) D.tab(id).lastActiveAt = Date.now() - 2 * 3600e3
       D.S.settings.memorySaverMs = 30 * 60e3; D.memorySaver()
       ok('memory saver unloads background tabs', D.views.size < loadedBefore, `${loadedBefore} → ${D.views.size} loaded`)
       // ---- Peek
@@ -490,6 +490,56 @@ module.exports = (D) => {
       ok('swipe on the sidebar switches spaces', onNext === sp1 && onPrev === sp0 && D.S.activeSpaceId === sp0, `${sp0} → ${onNext} → ${onPrev} → ${D.S.activeSpaceId}`)
       D.switchSpace(spBefore); await wait(500)
       D.closeTab(sids[1]); D.closeTab(hid)
+      // ---- background tabs: “Open Link in New Tab” keeps you where you are and shows Arc's “New Tab Created” pill
+      const bgFrom = D.space().activeTabId
+      const bgTab = D.newTab('https://nodejs.org/en/about', { activate: false, notify: true }); await wait(800)
+      const bgKids = D.win.contentView.children; const bgPages = [...D.views.values()].map(v => bgKids.indexOf(v))
+      const pillText = await D.noticeView?.webContents.executeJavaScript("document.querySelector('button').textContent")
+      const pillUp = D.space().activeTabId === bgFrom && D.todayTabs(D.space()).includes(bgTab) && D.noticeShown && bgKids.indexOf(D.noticeView) > Math.max(...bgPages) && pillText === 'New Tab Created'
+      await shot('24-new-tab-pill')
+      await D.noticeView?.webContents.executeJavaScript("document.querySelector('button').click()"); await wait(500)
+      ok('background tab: opens without switching, shows the pill', pillUp && D.space().activeTabId === bgTab && !D.noticeShown && !D.win.contentView.children.includes(D.noticeView), `pill up: ${pillUp} (text ${JSON.stringify(pillText)}); after click active=${D.space().activeTabId === bgTab ? 'new tab' : 'other'}, shown=${D.noticeShown}`)
+      // the extension library has no live active tab (what a restart leaves): its bookkeeping must not switch tabs
+      const keepTab = D.space().activeTabId
+      D.destroyView(keepTab); await wait(500)
+      const bg2 = D.newTab('https://nodejs.org/en/blog', { activate: false }); await wait(600)
+      const stayed = D.space().activeTabId === keepTab
+      D.activateTab(keepTab); await wait(1000)
+      const bg3 = D.newTab('https://nodejs.org/en/learn', { activate: false }); await wait(600)
+      ok('background tab: survives an empty extension tab record', stayed && D.space().activeTabId === keepTab, `after first: ${stayed ? 'unchanged' : 'switched'}; after second: ${D.space().activeTabId === keepTab ? 'unchanged' : 'switched'}`)
+      D.closeTab(bg2); D.closeTab(bg3)
+      // ---- Check for Updates always says something (dev build: “packaged builds only”; packaged: any final answer)
+      await Promise.race([D.checkForUpdates(false), wait(15000)]); D.checkForUpdates(true)
+      const updAt = Date.now(); while (D.upd.status === 'checking' && Date.now() - updAt < 15000) await wait(100)
+      ok('updates: a manual check always reports back', D.upd.status !== 'checking' && (D.app.isPackaged || /packaged builds only/.test(D.upd.message)), `${D.upd.status}: ${D.upd.message}`)
+      // ---- Tidy: same-site tabs become a named Today folder, singles stay loose
+      const tidyHome = D.S.activeSpaceId
+      D.createSpace('Tidy test'); await wait(500)
+      const tsp = D.space()
+      for (const u of ['https://nodejs.org/en/about', 'https://nodejs.org/en/blog', 'https://drift-test.invalid/']) D.newTab(u, { activate: false })
+      await wait(3000)
+      const tidyBtn = () => D.win.webContents.executeJavaScript("document.body.classList.contains('tidy')")
+      const canBefore = await tidyBtn()
+      D.tidyTabs(); await wait(700)
+      const tFolders = tsp.today.filter(id => D.S.folders[id]); const tLoose = tsp.today.filter(id => !D.S.folders[id])
+      const tDom = await D.win.webContents.executeJavaScript("document.querySelectorAll('#today > .folder').length + '|' + document.querySelectorAll('#today > .folder .kids .row').length + '|' + document.querySelectorAll('#today > .row').length + '|' + (document.querySelector('#today > .folder .frow .t')?.textContent || '')")
+      const tName = D.S.folders[tFolders[0]]?.name || ''
+      ok('tidy: same-site tabs become a named group', tFolders.length === 1 && D.S.folders[tFolders[0]].items.length === 2 && tLoose.length === 1 && tName.trim() !== '' && tDom === `1|2|1|${tName}` && canBefore && !(await tidyBtn()), `folder “${tName}”, ${tLoose.length} loose, dom ${tDom}, Tidy button before/after ${canBefore}/${await tidyBtn()}`)
+      await shot('25-tidy')
+      // Clear archives tabs inside folders too (and drops the folder; Clear doesn't spare the active tab)
+      const arch0 = D.S.archive.length
+      D.ACTIONS['clear-today'](); await wait(700)
+      ok('tidy: Clear archives grouped tabs too', D.todayTabs(tsp).length === 0 && tsp.today.length === 0 && !tFolders.some(id => D.S.folders[id]) && D.S.archive.length === Math.min(500, arch0 + 3), `${D.todayTabs(tsp).length} tabs left, ${tsp.today.length} entries, archive +${D.S.archive.length - arch0}`)
+      // Today folders survive sanitizeState (startup / after a sync) and a JSON round-trip
+      const g1 = D.newTab('https://nodejs.org/en/about', { activate: false }); const g2 = D.newTab('https://nodejs.org/en/blog', { activate: false }); await wait(1500)
+      D.tidyTabs()
+      const gid = tsp.today.find(id => D.S.folders[id]?.items.includes(g1))
+      D.sanitizeState()
+      const saved = JSON.parse(JSON.stringify({ today: tsp.today, folder: D.S.folders[gid] }))
+      ok('today folders survive a state round-trip', !!gid && tsp.today.includes(gid) && D.S.folders[gid].items.length === 2 && D.S.folders[gid].items.includes(g2) && saved.today.includes(gid) && saved.folder.items.length === 2 && saved.folder.tidyHost === 'nodejs.org', `folder ${gid}: ${D.S.folders[gid]?.items.length} items`)
+      D.closeTab(g1); D.closeTab(g2)
+      ok('tidy: a group disappears with its last tab', !D.S.folders[gid] && !tsp.today.includes(gid))
+      D.switchSpace(tidyHome); await wait(600)
     } catch (e) { ok('exception', false, e.stack) }
     fs.writeFileSync(path.join(out, 'results.txt'), log.join('\n'))
     D.app.exit(0)
