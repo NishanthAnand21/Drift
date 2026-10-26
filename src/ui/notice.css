@@ -1,0 +1,14 @@
+:root{--c:#7c5cff}
+html,body{margin:0;height:100%;background:transparent;overflow:hidden;font:600 13.5px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;user-select:none;-webkit-font-smoothing:antialiased}
+#pill{position:fixed;right:6px;top:4px;border:0;border-radius:12px;padding:9px 18px;font:inherit;white-space:nowrap;cursor:pointer;
+  color:#1d1a24;background:color-mix(in srgb,var(--c) 24%,#fff);box-shadow:0 4px 10px #00000029,0 0 0 .5px #0000001a;
+  opacity:0;transform:translateY(-8px) scale(.94)}
+#pill.dark{color:#f4f3f7;background:color-mix(in srgb,var(--c) 38%,#26242b)}
+#pill:focus-visible{outline:2px solid var(--c);outline-offset:2px}
+#pill.in{opacity:1;transform:none;transition:opacity .22s ease-out,transform .22s cubic-bezier(.34,1.56,.64,1)}
+#pill.in:hover{transform:translateY(-1px);filter:brightness(1.05);transition:transform .12s ease-out,filter .12s ease-out}
+#pill.in:active{transform:scale(.96)}
+#pill.out{opacity:0;transform:scale(.96);transition:opacity .16s ease-out,transform .16s ease-out}
+@media (prefers-reduced-motion:reduce){
+  #pill,#pill.in,#pill.in:hover,#pill.in:active,#pill.out{transform:none;transition:opacity .12s linear}
+}

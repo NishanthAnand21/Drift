@@ -1,9 +1,17 @@
 html,body{margin:0;height:100%;background:transparent;overflow:hidden;font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;user-select:none}
-#card{position:absolute;inset:0;background:#232326;color:#f2f2f4;border-radius:14px;box-shadow:0 0 0 1px #ffffff1a;overflow:hidden;display:flex;flex-direction:column}
+:root{--ease:cubic-bezier(.2,.8,.2,1);--spring:cubic-bezier(.34,1.56,.64,1)}
+#card{position:absolute;inset:0;background:#232326;color:#f2f2f4;border-radius:14px;box-shadow:0 0 0 1px #ffffff1a;overflow:hidden;display:flex;flex-direction:column;transform-origin:50% 0;animation:card-in 180ms var(--spring)}
+/* the card enters when the page first shows; its content is rebuilt on every hover, so that re-enters each time */
+@keyframes card-in{from{opacity:0;transform:scale(.97)}}
+@keyframes rin{from{opacity:0;transform:translateY(4px)}}
+@keyframes fab-in{from{opacity:0;transform:scale(.6)}}
+#card > *{transform-origin:50% 0;animation:card-in 180ms var(--spring)}
+#card > .list{animation:none}
 @media (prefers-color-scheme:light){#card{background:#fbfbfd;color:#1d1d22;box-shadow:0 0 0 1px #0000001a}.it{border-color:#0000000f!important}.sn,.dt,.meta{color:#6b6b74!important}}
 .list{overflow-y:auto;flex:1}
 .list::-webkit-scrollbar{width:0}
-.it{padding:11px 16px 12px;border-bottom:1px solid #ffffff14;cursor:default}
+.it{padding:11px 16px 12px;border-bottom:1px solid #ffffff14;cursor:default;transition:background-color 120ms var(--ease);animation:rin 200ms var(--ease) both}
+.it:nth-child(2){animation-delay:30ms}.it:nth-child(3){animation-delay:60ms}.it:nth-child(4){animation-delay:90ms}.it:nth-child(5){animation-delay:120ms}.it:nth-child(n+6){animation-delay:150ms}
 .it:hover{background:#ffffff0f}
 .top{display:flex;gap:10px;align-items:baseline}
 .from{flex:1;font-weight:600;font-size:14.5px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
@@ -19,6 +27,8 @@ html,body{margin:0;height:100%;background:transparent;overflow:hidden;font:13px 
 .meta b{color:inherit;font-weight:600;flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .center{flex:1;display:grid;place-items:center;text-align:center;padding:20px;color:#a3a3ab}
 .center img{width:32px;height:32px;margin-bottom:10px;border-radius:7px}
-#fab{position:absolute;right:14px;bottom:14px;width:46px;height:46px;border-radius:50%;border:0;background:#2f2f33;color:#fff;font-size:24px;box-shadow:0 4px 14px #0007;display:none}
+#fab{position:absolute;right:14px;bottom:14px;width:46px;height:46px;border-radius:50%;border:0;background:#2f2f33;color:#fff;font-size:24px;box-shadow:0 4px 14px #0007;display:none;transition:background-color 120ms var(--ease),transform 220ms var(--spring)}
 #fab:hover{background:#3a3a40}
-body.compose #fab{display:block}
+#fab:active{transform:scale(.94);transition:background-color 120ms var(--ease),transform 90ms var(--ease)}
+body.compose #fab{display:block;animation:fab-in 220ms var(--spring) 80ms both}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms!important;animation-delay:0s!important;animation-iteration-count:1!important;transition-duration:1ms!important}}

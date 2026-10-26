@@ -1,17 +1,27 @@
-:root{--space:#7c5cff;--bg:#fbfaff;--fg:#211d2b;--muted:#211d2b88;--sel:color-mix(in srgb,var(--space) 16%,transparent);color-scheme:light}
+:root{--space:#7c5cff;--bg:#fbfaff;--fg:#211d2b;--muted:#211d2b88;--sel:color-mix(in srgb,var(--space) 16%,transparent);color-scheme:light;--ease:cubic-bezier(.2,.8,.2,1);--spring:cubic-bezier(.34,1.56,.64,1)}
 @media (prefers-color-scheme:dark){:root{--bg:#25222d;--fg:#ece9f5;--muted:#ece9f588;--sel:color-mix(in srgb,var(--space) 35%,transparent);color-scheme:dark}}
 html,body{margin:0;height:100%;background:transparent;font:14px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--fg);overflow:hidden}
 #backdrop{position:fixed;inset:0;background:#0003}
-#box{position:absolute;left:50%;top:18vh;transform:translateX(-50%);width:min(660px,92vw);background:var(--bg);border-radius:14px;box-shadow:0 20px 60px #0005,0 0 0 1px #0001;overflow:hidden;animation:in .12s ease-out}
-@keyframes in{from{opacity:0;transform:translate(-50%,-6px) scale(.98)}}
+#box{position:absolute;left:0;right:0;margin:0 auto;top:18vh;transform-origin:50% 0;width:min(660px,92vw);background:var(--bg);border-radius:14px;box-shadow:0 20px 60px #0005,0 0 0 1px #0001;overflow:hidden}
+/* palette.js adds .opening on every open (restarting these) and .closing for ~110ms before it tells main to close */
+@keyframes box-in{from{opacity:0;transform:translateY(-6px) scale(.985)}}
+@keyframes box-out{to{opacity:0;transform:translateY(-4px) scale(.98)}}
+@keyframes fade-in{from{opacity:0}}
+@keyframes fade-out{to{opacity:0}}
+@keyframes res-in{from{opacity:0;transform:translateY(-3px)}}
+body.opening #box,body.opening #report,body.opening #peekbar{animation:box-in 180ms var(--spring)}
+body.opening #backdrop{animation:fade-in 140ms var(--ease)}
+body.closing{pointer-events:none}
+body.closing #box,body.closing #report{animation:box-out 120ms var(--ease) forwards}
+body.closing #backdrop{animation:fade-out 120ms var(--ease) forwards}
 #title{font-size:12px;color:var(--muted);padding:12px 18px 0}#title:empty{display:none}
 .in{display:flex;align-items:center;gap:10px;padding:0 18px;height:56px}
 #glyph{color:var(--space);font-size:18px}
 #q{flex:1;border:0;outline:0;background:none;font:inherit;font-size:18px;color:var(--fg)}
 #count{color:var(--muted);font-size:12px}
-#results{max-height:52vh;overflow:auto;border-top:1px solid #8881}
+#results{max-height:52vh;overflow:auto;border-top:1px solid #8881;animation:res-in 140ms var(--ease)}
 #results:empty{display:none}
-.r{display:flex;align-items:center;gap:10px;padding:8px 18px;height:40px;box-sizing:border-box}
+.r{display:flex;align-items:center;gap:10px;padding:8px 18px;height:40px;box-sizing:border-box;transition:background-color 80ms var(--ease)}
 .r.sel{background:var(--sel)}
 .r img,.r .ic{width:16px;height:16px;border-radius:3px;flex:none;display:grid;place-items:center;font-size:12px;color:var(--muted)}
 .r .sw{width:16px;height:16px;border-radius:50%}
@@ -20,14 +30,15 @@ html,body{margin:0;height:100%;background:transparent;font:14px -apple-system,Bl
 .r .k{color:var(--muted);font-size:11.5px}
 body.find #backdrop{display:none}
 #findnav,#findopts{display:none}
-body.find #box{left:0;top:0;transform:none;width:100%;height:100%;animation:none;border-radius:14px;box-sizing:border-box;padding:10px 12px;
+body.find #box{left:0;right:auto;margin:0;top:0;width:100%;height:100%;border-radius:14px;box-sizing:border-box;padding:10px 12px;
   background:color-mix(in srgb,var(--space) 12%,var(--bg));box-shadow:0 10px 30px #0004,0 0 0 1px color-mix(in srgb,var(--space) 30%,transparent)}
 body.find .in{height:44px;padding:0 6px 0 12px;border-radius:10px;background:var(--bg);box-shadow:inset 0 0 0 1px #8883}
 body.find #q{font-size:15px}
 body.find #glyph{display:none}
 body.find #findnav{display:flex;gap:2px;margin-left:8px}
-#findnav button{width:30px;height:30px;border:0;border-radius:7px;background:none;color:var(--fg);font-size:14px}
+#findnav button{width:30px;height:30px;border:0;border-radius:7px;background:none;color:var(--fg);font-size:14px;transition:background-color 120ms var(--ease),transform 220ms var(--spring)}
 #findnav button:hover{background:color-mix(in srgb,var(--space) 18%,transparent)}
+#findnav button:active,#peekbar button:active,#report header button:active{transform:scale(.92);transition:background-color 120ms var(--ease),transform 90ms var(--ease)}
 body.find #findopts{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;padding:10px 4px 0;font-size:13.5px}
 #findopts label{display:flex;align-items:center;gap:7px;cursor:default}
 #findopts input{width:17px;height:17px;margin:0;accent-color:var(--space)}
@@ -42,9 +53,9 @@ body.peek #backdrop{background:#0006}
 body.peek #peekbar{display:flex;align-items:center;gap:8px;position:fixed;left:11vw;right:11vw;top:calc(9vh - 6px);height:34px;padding:0 6px 0 14px;border-radius:10px;background:#1e1c24eb;color:#fff;font-size:12.5px;box-shadow:0 6px 20px #0004}
 #peektitle{font-weight:600;max-width:40%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #peekurl{flex:1;opacity:.7;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-#peekbar button,#report header button{border:0;background:#ffffff26;color:inherit;font:inherit;border-radius:7px;padding:4px 10px}
+#peekbar button,#report header button{border:0;background:#ffffff26;color:inherit;font:inherit;border-radius:7px;padding:4px 10px;transition:background-color 120ms var(--ease),transform 220ms var(--spring)}
 #peekbar button:hover{background:#ffffff40}
-body.report #report{display:flex;flex-direction:column;position:absolute;left:50%;top:6vh;transform:translateX(-50%);width:min(760px,94vw);max-height:88vh;background:var(--bg);border-radius:14px;box-shadow:0 20px 60px #0005;overflow:hidden}
+body.report #report{display:flex;flex-direction:column;position:absolute;left:0;right:0;margin:0 auto;top:6vh;transform-origin:50% 0;width:min(760px,94vw);max-height:88vh;background:var(--bg);border-radius:14px;box-shadow:0 20px 60px #0005;overflow:hidden}
 #report header{display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid #8882}
 #report header b{flex:1}#report header button{background:#8882}
 #report-body{overflow:auto;padding:4px 18px 18px;user-select:text}
@@ -54,3 +65,4 @@ body.report #report{display:flex;flex-direction:column;position:absolute;left:50
 .kv.ok .k::before{content:"● ";color:#16a34a}.kv.weak .k::before{content:"● ";color:#f5a524}.kv.bad .k::before{content:"● ";color:#e5484d}
 .grade{display:inline-grid;place-items:center;min-width:30px;height:24px;border-radius:6px;color:#fff;font-size:12px;padding:0 6px}
 .gA{background:#16a34a}.gB{background:#65a30d}.gC{background:#f5a524}.gD{background:#ea580c}.gF{background:#e5484d}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms!important;animation-iteration-count:1!important;transition-duration:1ms!important}}

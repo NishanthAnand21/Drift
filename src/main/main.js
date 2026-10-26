@@ -6,7 +6,7 @@ const {
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
-const { spawn } = require('child_process')
+const { spawn, execFile } = require('child_process')
 const { Store } = require('./store')
 const { isBlockedHost } = require('./blocker')
 const { createPasswords } = require('./passwords')
@@ -166,6 +166,7 @@ if (PRIVATE) Object.assign(DEFAULTS.spaces[0], { name: 'Private', color: '#55525
 
 let store, S, passwords
 const extensionsBySession = new Map() // session -> ElectronChromeExtensions
+let extSync = false // true while Drift tells the extension library about its own tab changes, so its selectTab callback doesn't echo them back
 let win = null
 let overlay = null // command bar / find bar / prompts
 let overlayOpen = null // { mode, ... }
@@ -193,12 +194,20 @@ const tab = (id) => S.tabs[id]
 const MAX_SPLIT = 4
 const inSplit = (sp, id) => !!sp?.split && sp.split.ids.includes(id)
 
-// Pinned folders: sp.pinned holds tab ids and folder ids; S.folders[fid] = { id, name, open, items: [tabIds] }
+// Folders: sp.pinned and sp.today hold tab ids and folder ids; S.folders[fid] = { id, name, open, items: [tabIds], tidyHost? }
+// (a Today folder is made by Tidy and disappears when its last tab does)
 const pinnedTabs = (sp) => sp.pinned.flatMap(id => S.folders[id] ? S.folders[id].items : [id])
+const todayTabs = (sp) => sp.today.flatMap(id => S.folders[id] ? S.folders[id].items : [id])
+const todayListOf = (sp, id) => [sp.today, ...sp.today.map(f => S.folders[f]?.items)].find(l => l?.includes(id))
+function dropToday (sp, id) { const l = todayListOf(sp, id); if (l) l.splice(l.indexOf(id), 1) }
+function pruneToday (sp) {
+  for (let i = sp.today.length - 1; i >= 0; i--) { const f = S.folders[sp.today[i]]; if (f && !f.items.length) { delete S.folders[sp.today[i]]; sp.today.splice(i, 1) } }
+}
 function locate (tabId) {
   for (const sp of S.spaces) {
     for (const fid of sp.pinned) if (S.folders[fid]?.items.includes(tabId)) return { type: 'pinned', space: sp, list: S.folders[fid].items, folder: fid }
     if (sp.pinned.includes(tabId)) return { type: 'pinned', space: sp, list: sp.pinned }
+    for (const fid of sp.today) if (S.folders[fid]?.items.includes(tabId)) return { type: 'today', space: sp, list: S.folders[fid].items, folder: fid }
     if (sp.today.includes(tabId)) return { type: 'today', space: sp, list: sp.today }
   }
   for (const p of S.profiles) if (p.favorites.includes(tabId)) return { type: 'favorite', profile: p, list: p.favorites }
@@ -405,17 +414,52 @@ function tidyTitle (title, url) {
   }
   return t.length > 48 ? t.slice(0, 46).trim() + '…' : t
 }
+const tabHost = (id) => { try { return new URL(tab(id).url).hostname.replace(/^www\./, '') } catch { return '' } }
+const SITE_NAMES = {
+  'docs.google.com': 'Google Docs', 'sheets.google.com': 'Google Sheets', 'drive.google.com': 'Google Drive', 'mail.google.com': 'Gmail', 'github.com': 'GitHub',
+  'youtube.com': 'YouTube', 'x.com': 'X', 'twitter.com': 'X', 'reddit.com': 'Reddit', 'stackoverflow.com': 'Stack Overflow', 'wikipedia.org': 'Wikipedia',
+  'notion.so': 'Notion', 'figma.com': 'Figma', 'linear.app': 'Linear', 'slack.com': 'Slack', 'chatgpt.com': 'ChatGPT', 'openai.com': 'OpenAI', 'claude.ai': 'Claude'
+}
+function siteName (host) {
+  for (const [k, v] of Object.entries(SITE_NAMES)) if (host === k || host.endsWith('.' + k)) return v
+  const parts = host.split('.')
+  if (parts.length < 2 || /^[\d.]+$/.test(host)) return host
+  const label = parts.length > 2 && /^(co|com|org|net|gov|edu|ac)$/.test(parts[parts.length - 2]) ? parts[parts.length - 3] : parts[parts.length - 2]
+  return label.charAt(0).toUpperCase() + label.slice(1)
+}
+// A group is named after what its tabs' titles share at the end ("… - YouTube", "… · GitHub"), else after the site
+function groupName (host, ids) {
+  const tails = ids.map(id => (tab(id).title || '').trim().split(/\s+[|\-–—·•:]\s+/)).map(p => (p.length > 1 ? p[p.length - 1].trim() : ''))
+  const shared = tails[0] && tails[0].length <= 30 && tails.every(x => x.toLowerCase() === tails[0].toLowerCase()) ? tails[0] : ''
+  return shared || siteName(host)
+}
+// Exact-duplicate URLs (never the active tab or a split tab) and the loose Today tabs of each site
+function dupeTabs (sp) {
+  const seen = new Set()
+  return todayTabs(sp).filter(id => { const u = tab(id)?.url; if (u === undefined) return false; if (seen.has(u) && id !== sp.activeTabId && !inSplit(sp, id)) return true; seen.add(u); return false })
+}
+function looseByHost (sp) {
+  const m = new Map()
+  for (const id of sp.today) { const h = tab(id) && !inSplit(sp, id) ? tabHost(id) : ''; if (h) m.set(h, [...(m.get(h) || []), id]) }
+  return m
+}
+const canTidy = (sp) => !!S.settings.tidyTabs && (dupeTabs(sp).length > 0 || [...looseByHost(sp).values()].some(ids => ids.length > 1))
 function tidyTabs () {
   const sp = space()
-  const seen = new Set(); let dupes = 0
-  for (const id of [...sp.today]) {
-    const t = tab(id); if (!t) continue
-    if (seen.has(t.url) && id !== sp.activeTabId) { sp.today.splice(sp.today.indexOf(id), 1); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]; dupes++ } else seen.add(t.url)
+  let dupes = 0
+  for (const id of dupeTabs(sp)) { const t = tab(id); dropToday(sp, id); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]; dupes++ }
+  let groups = 0; let grouped = 0
+  for (const [host, ids] of looseByHost(sp)) {
+    if (ids.length < 2) continue
+    let f = sp.today.map(id => S.folders[id]).find(x => x?.tidyHost === host)
+    if (!f) { const fid = uid('f'); f = S.folders[fid] = { id: fid, name: groupName(host, ids), open: true, items: [], tidyHost: host }; sp.today.splice(sp.today.indexOf(ids[0]), 0, fid) }
+    for (const id of ids) { sp.today.splice(sp.today.indexOf(id), 1); f.items.push(id) }
+    f.open = true; groups++; grouped += ids.length
   }
-  const hostOf = (id) => { try { return new URL(tab(id).url).hostname.replace(/^www\./, '') } catch { return '' } }
-  const order = []; for (const id of sp.today) { const h = hostOf(id); if (!order.includes(h)) order.push(h) }
-  sp.today.sort((a, b) => order.indexOf(hostOf(a)) - order.indexOf(hostOf(b)))
-  store.save(); pushState(); toast(`Tidied: grouped by site${dupes ? `, archived ${dupes} duplicate${dupes > 1 ? 's' : ''}` : ''}`)
+  pruneToday(sp)
+  store.save(); pushState()
+  const plural = (n, w) => `${n} ${w}${n > 1 ? 's' : ''}`
+  toast(groups || dupes ? [groups && `Tidied ${plural(grouped, 'tab')} into ${plural(groups, 'group')}`, dupes && `${groups ? 'archived' : 'Archived'} ${plural(dupes, 'duplicate')}`].filter(Boolean).join(', ') : 'Nothing to tidy')
 }
 
 // ---------------------------------------------------------------- Chrome extensions
@@ -431,7 +475,7 @@ function setupExtensions (ses) {
         const id = newTab(details.url || 'about:blank', { activate: details.active !== false })
         return [ensureView(id).webContents, win]
       },
-      selectTab: (wc) => { const id = wcToTab.get(wc.id); if (id) activateTab(id) },
+      selectTab: (wc) => { if (extSync) return; const id = wcToTab.get(wc.id); if (id) activateTab(id) },
       removeTab: (wc) => { const id = wcToTab.get(wc.id); if (id) closeTab(id) },
       createWindow: async (details) => {
         const url = [].concat(details.url || [])[0]
@@ -519,7 +563,8 @@ function ensureView (tabId) {
   wcToTab.set(wc.id, tabId)
   live.set(tabId, { loading: false, canBack: false, canFwd: false, blocked: 0, audible: false, muted: false, zoom: 0 })
   wireWebContents(tabId, wc)
-  extFor(tabId)?.addTab(wc, win)
+  extSync = true
+  try { extFor(tabId)?.addTab(wc, win) } finally { extSync = false }
   const vis = visualFile(t.url)
   // re-checked here too: it comes back from the state file
   const saved = t.nav?.entries?.[t.nav.index]?.url === t.url && t.nav.entries.every(e => isSafeWebUrl(e?.url)) ? t.nav : null
@@ -665,7 +710,7 @@ function wireWebContents (tabId, wc) {
       }
     }
     const loc = locate(tabId)
-    newTab(url, { spaceId: loc?.space?.id, activate: disposition !== 'background-tab' })
+    newTab(url, { spaceId: loc?.space?.id, activate: disposition !== 'background-tab', notify: true })
     return { action: 'deny' }
   })
   wc.on('did-create-window', (child) => {
@@ -715,7 +760,7 @@ function pageContextMenu (tabId, wc, p) {
   const items = []
   if (p.linkURL) {
     items.push(
-      { label: 'Open Link in New Tab', click: () => newTab(p.linkURL, { activate: false }) },
+      { label: 'Open Link in New Tab', click: () => newTab(p.linkURL, { activate: false, notify: true }) },
       { label: 'Open Link in Split View', click: () => openSplit(p.linkURL) },
       { label: 'Open Link in Peek', click: () => openPeek(p.linkURL) },
       { label: 'Copy Link', click: () => clipboard.writeText(p.linkURL) },
@@ -749,13 +794,13 @@ function pageContextMenu (tabId, wc, p) {
 }
 
 // ---------------------------------------------------------------- tab ops
-function newTab (url, { spaceId = S.activeSpaceId, activate = true } = {}) {
+function newTab (url, { spaceId = S.activeSpaceId, activate = true, notify = false } = {}) {
   const id = uid('t')
   S.tabs[id] = { id, url, title: url, favicon: null, createdAt: Date.now(), lastActiveAt: Date.now() }
   const sp = space(spaceId)
   sp.today.unshift(id)
   if (activate) activateTab(id)
-  else { ensureView(id); pushState() }
+  else { ensureView(id); pushState(); if (notify) showTabNotice(id) }
   store.save()
   return id
 }
@@ -776,7 +821,8 @@ function activateTab (tabId, { from } = {}) {
   sp.activeTabId = tabId
   tab(tabId).lastActiveAt = Date.now()
   ensureView(tabId)
-  try { extFor(tabId)?.selectTab(views.get(tabId).webContents) } catch {}
+  extSync = true
+  try { extFor(tabId)?.selectTab(views.get(tabId).webContents) } catch {} finally { extSync = false }
   if (chatOpen) chatView?.webContents.send('chat', 'page', tab(tabId).customTitle || tab(tabId).title)
   layout()
   if (!overlayOpen) views.get(tabId)?.webContents.focus()
@@ -799,13 +845,15 @@ function closeTab (tabId, { archive = true } = {}) {
     if (t.pinnedUrl) { t.url = t.pinnedUrl }
     for (const s of S.spaces) if (s.activeTabId === tabId) s.activeTabId = pickNeighbor(s, tabId)
   } else {
-    const idx = sp.today.indexOf(tabId)
-    if (idx >= 0) sp.today.splice(idx, 1)
+    const idx = todayTabs(sp).indexOf(tabId)
+    dropToday(sp, tabId)
     destroyView(tabId)
     recentlyClosed.push({ url: t.url, title: t.title, spaceId: sp.id })
     if (archive) archiveEntry(t, sp.id)
     delete S.tabs[tabId]
-    if (sp.activeTabId === tabId) sp.activeTabId = sp.today[Math.min(idx, sp.today.length - 1)] || pinnedTabs(sp)[0] || null
+    pruneToday(sp)
+    const rest = todayTabs(sp)
+    if (sp.activeTabId === tabId) sp.activeTabId = rest[Math.min(idx, rest.length - 1)] || pinnedTabs(sp)[0] || null
   }
   const now = space().activeTabId
   if (now) activateTab(now); else { layout(); pushState() }
@@ -813,8 +861,8 @@ function closeTab (tabId, { archive = true } = {}) {
 }
 
 function pickNeighbor (sp, tabId) {
-  const all = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...sp.today].filter(id => id !== tabId && views.has(id))
-  return all[0] || sp.today[0] || null
+  const all = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...todayTabs(sp)].filter(id => id !== tabId && views.has(id))
+  return all[0] || todayTabs(sp)[0] || null
 }
 
 function archiveEntry (t, spaceId) {
@@ -844,29 +892,31 @@ function autoArchive () {
   const now = Date.now()
   let changed = false
   for (const sp of S.spaces) {
-    for (const id of [...sp.today]) {
+    for (const id of todayTabs(sp)) {
       const t = tab(id)
       if (!t || id === sp.activeTabId) continue
       if (inSplit(sp, id) || pip?.tabId === id) continue
       if (live.get(id)?.audible) continue
       if (now - (t.lastActiveAt || 0) > limit) {
-        sp.today.splice(sp.today.indexOf(id), 1)
+        dropToday(sp, id)
         destroyView(id)
         archiveEntry(t, sp.id)
         delete S.tabs[id]
         changed = true
       }
     }
+    pruneToday(sp)
   }
   if (changed) { store.save(); layout(); pushState() }
 }
 
 function clearToday () {
   const sp = space()
-  for (const id of [...sp.today]) {
+  for (const id of todayTabs(sp)) {
     if (inSplit(sp, id)) continue
-    const t = tab(id); sp.today.splice(sp.today.indexOf(id), 1); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]
+    const t = tab(id); dropToday(sp, id); destroyView(id); archiveEntry(t, sp.id); delete S.tabs[id]
   }
+  pruneToday(sp)
   if (!tab(sp.activeTabId) || !locate(sp.activeTabId)) sp.activeTabId = pickNeighbor(sp, null)
   if (sp.activeTabId) activateTab(sp.activeTabId); else { layout(); pushState() }
   store.save()
@@ -880,13 +930,14 @@ function moveTab (tabId, to, { index = -1, spaceId = S.activeSpaceId, folderId =
   const oldProfile = profileIdOfTab(tabId)
   loc.list.splice(loc.list.indexOf(tabId), 1)
   let list
-  if (to === 'folder') { if (!S.folders[folderId] || !sp.pinned.includes(folderId)) { loc.list.push(tabId); return } list = S.folders[folderId].items; S.folders[folderId].open = true }
+  if (to === 'folder') { if (!S.folders[folderId] || !(sp.pinned.includes(folderId) || sp.today.includes(folderId))) { loc.list.push(tabId); return } list = S.folders[folderId].items; S.folders[folderId].open = true }
   else if (to === 'favorite') list = profile(sp.profileId).favorites
   else if (to === 'pinned') list = sp.pinned
   else list = sp.today
   if (index < 0 || index > list.length) index = to === 'today' && loc.type !== 'today' ? 0 : list.length
   list.splice(index, 0, tabId)
-  if (to === 'folder') to = 'pinned'
+  if (to === 'folder') to = sp.pinned.includes(folderId) ? 'pinned' : 'today' // a tab dropped into a Today folder stays unpinned
+  if (loc.space) pruneToday(loc.space)
   t.pinnedUrl = to === 'today' ? undefined : (t.pinnedUrl || t.url)
   if (to !== 'today' && loc.type === 'today' && S.settings.tidyTitles && !t.customTitle) t.customTitle = tidyTitle(t.title, t.url)
   if (to === 'today') delete t.customTitle
@@ -906,17 +957,20 @@ function newFolder () {
 }
 function deleteFolder (fid) {
   const f = S.folders[fid]; if (!f) return
-  for (const sp of S.spaces) { const i = sp.pinned.indexOf(fid); if (i >= 0) sp.pinned.splice(i, 1, ...f.items) }
+  for (const sp of S.spaces) for (const list of [sp.pinned, sp.today]) { const i = list.indexOf(fid); if (i >= 0) list.splice(i, 1, ...f.items) }
   delete S.folders[fid]; store.save(); pushState()
 }
 function folderMenu (fid) {
   const f = S.folders[fid]; if (!f) return
+  const today = S.spaces.some(sp => sp.today.includes(fid))
   Menu.buildFromTemplate([
     { label: 'Rename Folder…', click: () => prompt('Rename folder', f.name, (n) => { if (n) { f.name = n.slice(0, 60); store.save(); pushState() } }) },
     { label: f.open === false ? 'Expand' : 'Collapse', click: () => { f.open = f.open === false; store.save(); pushState() } },
-    { label: 'Unload All Tabs in Folder', enabled: f.items.some(id => views.has(id)), click: () => { for (const id of f.items) closeTab(id) } },
+    today
+      ? { label: 'Close All Tabs in Folder', enabled: f.items.length > 0, click: () => { for (const id of [...f.items]) closeTab(id) } }
+      : { label: 'Unload All Tabs in Folder', enabled: f.items.some(id => views.has(id)), click: () => { for (const id of f.items) closeTab(id) } },
     { type: 'separator' },
-    { label: 'Delete Folder (keep its tabs)', click: () => deleteFolder(fid) }
+    { label: today ? 'Ungroup (keep its tabs)' : 'Delete Folder (keep its tabs)', click: () => deleteFolder(fid) }
   ]).popup(menuOpts())
 }
 function togglePin (tabId = activeTabId()) {
@@ -959,7 +1013,8 @@ function openSplit (urlOrTabId) {
   if (!other) {
     other = uid('t')
     S.tabs[other] = { id: other, url: urlOrTabId, title: urlOrTabId, favicon: null, createdAt: Date.now(), lastActiveAt: Date.now() }
-    sp.today.splice(Math.max(0, sp.today.indexOf(base) + 1), 0, other)
+    const bl = todayListOf(sp, base) || sp.today
+    bl.splice(Math.max(0, bl.indexOf(base) + 1), 0, other)
   }
   if (other === base) return
   // keep a split's tabs next to each other: the sidebar shows them as one row (like Arc)
@@ -1017,7 +1072,7 @@ function createSpace (name, { newProfile = false } = {}) {
 
 // The space's most recently used tab (loaded or not) — what you expect to see when you return to it
 function mostRecentTab (sp) {
-  const ids = [...sp.today, ...pinnedTabs(sp), ...(profile(sp.profileId)?.favorites || [])].filter(id => tab(id))
+  const ids = [...todayTabs(sp), ...pinnedTabs(sp), ...(profile(sp.profileId)?.favorites || [])].filter(id => tab(id))
   return ids.sort((x, y) => (tab(y).lastActiveAt || 0) - (tab(x).lastActiveAt || 0))[0] || null
 }
 function switchSpace (id) {
@@ -1033,8 +1088,8 @@ function switchSpace (id) {
 function deleteSpace (id = S.activeSpaceId) {
   if (S.spaces.length <= 1) return toast('You need at least one space')
   const sp = space(id)
-  for (const tid of [...pinnedTabs(sp), ...sp.today]) { destroyView(tid); archiveEntry(tab(tid), id); delete S.tabs[tid] }
-  for (const fid of sp.pinned) delete S.folders[fid]
+  for (const tid of [...pinnedTabs(sp), ...todayTabs(sp)]) { destroyView(tid); archiveEntry(tab(tid), id); delete S.tabs[tid] }
+  for (const fid of [...sp.pinned, ...sp.today]) delete S.folders[fid]
   S.spaces = S.spaces.filter(s => s.id !== id)
   S.sync.tombstones[id] = Date.now()
   // drop profiles no space uses any more (keep its data on disk)
@@ -1099,6 +1154,7 @@ function layout () {
   placeSidebarFloat()
   restack()
   lastLayout = { area, rects, dir: sp.split?.dir || 'row' }
+  if (noticeShown && noticeView) noticeView.setBounds(noticeBounds())
   win.webContents.send('layout', { area, panes: needed.length > 1 && !htmlFullscreen ? needed.map((id, i) => ({ id, ...rects[i], active: id === act })) : null, dir: sp.split?.dir || 'row' })
 }
 
@@ -1112,7 +1168,7 @@ function restack () {
   if (!win || win.isDestroyed()) return
   const open = new Set(views.values()); const alive = (v) => v && !v.webContents.isDestroyed()
   const lingering = [...pipLinger].map(id => views.get(id)).filter(v => v && !shownTabs.includes(v))
-  const want = [...lingering, ...shownTabs.filter(v => open.has(v)), ...shownPanels.filter(alive), floatAttached && sidebarFloat, toastShown && toastView, previewFor && previewView, popoverOpen && popView,
+  const want = [...lingering, ...shownTabs.filter(v => open.has(v)), ...shownPanels.filter(alive), floatAttached && sidebarFloat, toastShown && toastView, noticeShown && noticeView, previewFor && previewView, popoverOpen && popView,
     overlayOpen && overlay, peekView, dragMode && dragShield].filter(Boolean)
   const kids = win.contentView.children
   let prev = -1; let i = 0
@@ -1317,7 +1373,7 @@ function paletteSnapshot () {
   const sp = space()
   const tabs = []
   for (const s of S.spaces) {
-    for (const id of [...pinnedTabs(s), ...s.today]) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: s.name }) }
+    for (const id of [...pinnedTabs(s), ...todayTabs(s)]) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: s.name }) }
   }
   for (const id of profile(sp.profileId).favorites) { const t = tab(id); if (t) tabs.push({ id, title: t.title, url: t.url, favicon: iconFor(t), space: 'Favorites' }) }
   return {
@@ -2295,6 +2351,7 @@ function settingsData () {
     settings: S.settings,
     version: app.getVersion(),
     chrome: process.versions.chrome,
+    update: upd,
     engines: Object.entries(ENGINES).map(([k, e]) => [k, e.name]),
     profiles: S.profiles.map(p => ({ id: p.id, name: p.name, spaces: spacesPer(p.id) })),
     permissions: perms,
@@ -2349,6 +2406,8 @@ async function setSetting (key, value) {
 const SETTINGS_ACTIONS = {
   'default-browser': () => runCommand('default-browser'),
   'check-updates': () => checkForUpdates(true),
+  'update-download': () => downloadUpdate(),
+  'update-restart': () => { if (autoUpdater && upd.status === 'ready') { store.saveNow(); autoUpdater.quitAndInstall() } },
   'profile-add': () => { win.focus(); prompt('New profile name', '', (n) => { if (n) { S.profiles.push({ id: uid('p'), name: n, favorites: [] }); store.save(); sendSettings() } }) },
   'profile-rename': (id) => { const p = profile(id); if (!p) return; win.focus(); prompt('Rename profile', p.name, (n) => { if (n) { p.name = n; store.save(); sendSettings(); pushState() } }) },
   'profile-delete': async (id) => {
@@ -2388,7 +2447,7 @@ async function exportData () {
   const data = {
     exportedAt: new Date().toISOString(),
     profiles: S.profiles.map(p => ({ name: p.name, favorites: tabsOf(p.favorites) })),
-    spaces: S.spaces.map(s => ({ name: s.name, color: s.color, profile: profile(s.profileId)?.name, pinned: tabsOf(pinnedTabs(s)), folders: s.pinned.filter(id => S.folders[id]).map(id => ({ name: S.folders[id].name, tabs: tabsOf(S.folders[id].items) })), today: tabsOf(s.today) })),
+    spaces: S.spaces.map(s => ({ name: s.name, color: s.color, profile: profile(s.profileId)?.name, pinned: tabsOf(pinnedTabs(s)), folders: s.pinned.filter(id => S.folders[id]).map(id => ({ name: S.folders[id].name, tabs: tabsOf(S.folders[id].items) })), today: tabsOf(todayTabs(s)) })),
     archive: S.archive, history: S.history, boosts: S.boosts, settings: S.settings
   }
   fs.writeFileSync(r.filePath, JSON.stringify(data, null, 2)); toast('Data exported (passwords not included)')
@@ -2431,7 +2490,7 @@ async function mcpCall (name, a) {
   switch (name) {
     case 'list_tabs': {
       const out = []
-      for (const sp of S.spaces) { for (const id of pinnedTabs(sp)) out.push(tabInfo(id, sp.name, 'pinned')); for (const id of sp.today) out.push(tabInfo(id, sp.name, 'today')) }
+      for (const sp of S.spaces) { for (const id of pinnedTabs(sp)) out.push(tabInfo(id, sp.name, 'pinned')); for (const id of todayTabs(sp)) out.push(tabInfo(id, sp.name, 'today')) }
       for (const p of S.profiles) for (const id of p.favorites) out.push(tabInfo(id, `favorites (${p.name})`, 'favorite'))
       return out
     }
@@ -2482,7 +2541,7 @@ function pickProfile (id = S.activeSpaceId) {
   pick('Profile for this space (separate cookies, logins & favourites)', items, (v) => {
     const set = (pid) => {
       const sp = space(id)
-      for (const tid of [...pinnedTabs(sp), ...sp.today]) destroyView(tid)
+      for (const tid of [...pinnedTabs(sp), ...todayTabs(sp)]) destroyView(tid)
       sp.profileId = pid; store.save(); layout(); if (sp.activeTabId) activateTab(sp.activeTabId); pushState()
     }
     if (v === '__new') setTimeout(() => prompt('Profile name', '', (n) => { if (!n) return; const pid = uid('p'); S.profiles.push({ id: pid, name: n, favorites: [] }); set(pid) }))
@@ -2539,7 +2598,7 @@ function tabContextMenu (tabId) {
   if (tab(tabId).pinnedUrl && loc.type !== 'today') tmpl.push({ label: 'Back to Pinned Page', enabled: drifted(tab(tabId)), click: () => resetPinned(tabId) })
   if (others.length) tmpl.push({ label: 'Move to Space', submenu: others.map(s => ({ label: s.name, click: () => moveTab(tabId, loc.type === 'favorite' ? 'today' : loc.type, { spaceId: s.id }) })) })
   tmpl.push({ type: 'separator' }, { label: loc.type === 'today' ? 'Close Tab' : 'Unload Tab', click: () => closeTab(tabId) })
-  if (loc.type === 'today') tmpl.push({ label: 'Close Tabs Below', click: () => { const l = sp.today; for (const id of l.slice(l.indexOf(tabId) + 1)) closeTab(id) } })
+  if (loc.type === 'today') tmpl.push({ label: 'Close Tabs Below', click: () => { const l = locate(tabId)?.list || []; for (const id of l.slice(l.indexOf(tabId) + 1).flatMap(i => S.folders[i] ? S.folders[i].items : [i])) closeTab(id) } })
   Menu.buildFromTemplate(tmpl).popup(menuOpts())
 }
 function spaceContextMenu (id) {
@@ -2596,13 +2655,14 @@ function pushState () {
     const l = live.get(id)
     return { id, title: x.customTitle || x.title, url: x.url, favicon: iconFor(x), loaded: !!l, loading: l?.loading, audible: l?.audible, muted: l?.muted, drifted: drifted(x) }
   }
+  const entry = (id) => (S.folders[id] ? { folder: true, id, name: S.folders[id].name, open: S.folders[id].open !== false, items: S.folders[id].items.map(t).filter(Boolean) } : t(id))
   const act = sp.activeTabId; const l = live.get(act)
   sendSidebar('state', {
     spaces: S.spaces.map(s => ({ id: s.id, name: s.name, icon: s.icon || '', color: s.color, theme: s.theme, profile: profile(s.profileId)?.name })),
     activeSpaceId: S.activeSpaceId,
     favorites: profile(sp.profileId).favorites.map(t).filter(Boolean),
-    pinned: sp.pinned.map(id => S.folders[id] ? { folder: true, id, name: S.folders[id].name, open: S.folders[id].open !== false, items: S.folders[id].items.map(t).filter(Boolean) } : t(id)).filter(Boolean),
-    today: sp.today.map(t).filter(Boolean),
+    pinned: sp.pinned.map(entry).filter(Boolean),
+    today: sp.today.map(entry).filter(Boolean),
     activeTabId: act,
     split: sp.split,
     panes: sp.split && sp.split.ids.every(id => tab(id)) ? sp.split.ids.map(id => { const x = tab(id); const l = live.get(id); return { id, url: x.url, title: x.customTitle || x.title, canBack: !!l?.canBack, canFwd: !!l?.canFwd, loading: !!l?.loading } }) : null,
@@ -2610,6 +2670,7 @@ function pushState () {
     sidebarPeek,
     chatOpen,
     tidyTabs: S.settings.tidyTabs,
+    canTidy: canTidy(sp),
     dimUnloaded: S.settings.dimUnloaded,
     pinnedResetButton: S.settings.pinnedResetButton,
     sidebarWidth: S.settings.sidebarWidth,
@@ -2647,8 +2708,46 @@ function toast (msg) {
   toastTimer = setTimeout(() => { toastShown = false; try { win?.contentView.removeChildView(toastView) } catch {} }, 2800)
 }
 
+// Arc's “New Tab Created” pill: a small view at the top-right of the page after a link opens in the
+// background; clicking it goes to that tab. The page plays its exit animation before the view is detached.
+let noticeView = null; let noticeShown = false; let noticeTab = null; let noticeTimer = null; let noticeDetachTimer = null
+const NOTICE_W = 240; const NOTICE_H = 56
+function noticeBounds () {
+  const sp = space(); const L = lastLayout; const [w] = win.getContentSize()
+  const pane = L && L.rects.length > 1 ? Math.max(0, sp.split?.ids.indexOf(sp.activeTabId) ?? 0) : -1
+  const r = (pane >= 0 && L.rects[pane]) || L?.area || { x: PAD, y: PAD, width: w - PAD * 2 }
+  return { x: r.x + r.width - NOTICE_W - 6, y: r.y + (pane >= 0 ? PANE_BAR : 0) + 6, width: NOTICE_W, height: NOTICE_H }
+}
+function showTabNotice (id) {
+  if (!win || win.isDestroyed()) return
+  const page = views.get(activeTabId())?.webContents; const hadFocus = !!page && page.isFocused() // a fresh view takes focus on its first load
+  const keepFocus = () => { if (hadFocus && !page.isDestroyed() && !overlayOpen) page.focus() }
+  if (!noticeView) {
+    noticeView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    noticeView.setBackgroundColor('#00000000')
+    noticeView.webContents.loadURL(uiURL('notice.html'))
+    noticeView.webContents.on('will-navigate', e => e.preventDefault())
+    noticeView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  }
+  clearTimeout(noticeDetachTimer)
+  noticeTab = id; noticeShown = true
+  noticeView.setBounds(noticeBounds()); restack(); keepFocus()
+  const send = () => { noticeView?.webContents.send('notice', { text: 'New Tab Created', color: space().theme.colors[0], dark: popoverDark() }); keepFocus() }
+  if (noticeView.webContents.isLoading()) noticeView.webContents.once('did-finish-load', send); else send()
+  armNotice(3500)
+}
+const armNotice = (ms) => { clearTimeout(noticeTimer); noticeTimer = setTimeout(hideTabNotice, ms) }
+function hideTabNotice ({ now = false } = {}) {
+  clearTimeout(noticeTimer); clearTimeout(noticeDetachTimer)
+  if (!noticeShown || !noticeView) return
+  const detach = () => { noticeShown = false; noticeTab = null; try { win?.contentView.removeChildView(noticeView) } catch {} }
+  if (now || noticeView.webContents.isDestroyed()) return detach()
+  noticeView.webContents.send('notice', null)
+  noticeDetachTimer = setTimeout(detach, 180)
+}
+
 // ---------------------------------------------------------------- IPC (only from our own UI views)
-const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents) || (previewView && e.sender === previewView.webContents) || (popView && e.sender === popView.webContents) || (sidebarFloat && e.sender === sidebarFloat.webContents)
+const isOurUI = (e) => e.sender === win?.webContents || e.sender === overlay?.webContents || (noticeView && e.sender === noticeView.webContents) || (settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents) || [...miniWindows].some(m => e.sender === m.ui) || (chatView && e.sender === chatView.webContents) || (claudeBar && e.sender === claudeBar.webContents) || (dragShield && e.sender === dragShield.webContents) || (previewView && e.sender === previewView.webContents) || (popView && e.sender === popView.webContents) || (sidebarFloat && e.sender === sidebarFloat.webContents)
 const ACTIONS = {
   ready: () => { pushState(); layout() },
   activate: (id) => activateTab(id),
@@ -2662,7 +2761,7 @@ const ACTIONS = {
   'switch-space': (id) => switchSpace(id),
   'new-space': () => prompt('Name your new space', '', (n) => n && createSpace(n)),
   move: (id, to, index, spaceId, folderId) => moveTab(id, to, { index, spaceId: spaceId || S.activeSpaceId, folderId }),
-  'move-folder': (fid, index) => { const sp = space(); const i = sp.pinned.indexOf(fid); if (i < 0) return; sp.pinned.splice(i, 1); sp.pinned.splice(Math.max(0, Math.min(index, sp.pinned.length)), 0, fid); store.save(); pushState() },
+  'move-folder': (fid, index) => { const sp = space(); const l = [sp.pinned, sp.today].find(x => x.includes(fid)); if (!l || !S.folders[fid]) return; l.splice(l.indexOf(fid), 1); l.splice(Math.max(0, Math.min(index, l.length)), 0, fid); store.save(); pushState() },
   'toggle-folder': (fid) => { const f = S.folders[fid]; if (f) { f.open = f.open === false; store.save(); pushState() } },
   'folder-menu': (fid) => folderMenu(fid),
   'new-folder': () => newFolder(),
@@ -2675,6 +2774,8 @@ const ACTIONS = {
   'sidebar-resize-start': () => { if (S.sidebarVisible) startShieldDrag('sidebar', 'row') },
   peek: (on) => { if (on) setPeek(true); else peekCheck() },
   'clear-today': clearToday,
+  'notice-open': () => { const id = noticeTab; hideTabNotice({ now: true }); if (id) activateTab(id) },
+  'notice-hover': (on) => { if (!noticeShown) return; if (on) clearTimeout(noticeTimer); else armNotice(1500) },
   'split-drag-start': (i) => startSplitDrag(Number(i)),
   'split-drag': (x, y) => shieldDrag(Number(x), Number(y)),
   'split-drag-end': () => endSplitDrag(),
@@ -2765,7 +2866,7 @@ function buildMenu () {
   const tabNums = Array.from({ length: 9 }, (_, i) => ({
     label: `Tab ${i + 1}`, accelerator: `CmdOrCtrl+${i + 1}`, visible: false,
     click: () => {
-      const sp = space(); const list = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...sp.today]
+      const sp = space(); const list = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...todayTabs(sp)]
       const id = i === 8 ? list[list.length - 1] : list[i]; if (id) activateTab(id)
     }
   }))
@@ -2842,30 +2943,78 @@ function buildMenu () {
   Menu.setApplicationMenu(Menu.buildFromTemplate(tmpl))
 }
 function stepTab (dir) {
-  const sp = space(); const list = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...sp.today]
+  const sp = space(); const list = [...profile(sp.profileId).favorites, ...pinnedTabs(sp), ...todayTabs(sp)]
   if (!list.length) return
   const i = list.indexOf(sp.activeTabId)
   activateTab(list[(i + dir + list.length) % list.length])
 }
 
 // ---------------------------------------------------------------- updates
-let autoUpdater = null
-function checkForUpdates (manual = false) {
-  if (!app.isPackaged) { if (manual) toast('Updates are checked in packaged builds only'); return }
+// Release builds are ad-hoc signed (no Developer ID), so Squirrel.Mac can't install an update in place:
+// those offer the new DMG instead (downloadUpdate). Properly signed builds download and install by themselves.
+let autoUpdater = null; let manualCheck = false; let updateInfo = null; let adhocBuild = null
+const upd = { status: 'idle', version: null, percent: 0, message: '' } // shown in Settings → General
+function setUpdate (patch) { Object.assign(upd, patch); sendSettings() }
+const updateBox = (o) => (win && !win.isDestroyed() ? dialog.showMessageBox(win, o) : dialog.showMessageBox(o))
+const isAdhocBuild = () => adhocBuild || (adhocBuild = new Promise(resolve => {
+  if (!isMac || !app.isPackaged) return resolve(false)
+  execFile('/usr/bin/codesign', ['-dv', path.resolve(path.dirname(app.getPath('exe')), '..', '..')], { timeout: 8000 }, (_e, _out, stderr) => {
+    const s = String(stderr || ''); resolve(/Signature=adhoc/.test(s) || !/TeamIdentifier=(?!not set)\S/.test(s))
+  })
+}))
+// The DMG for this Mac from the update feed, opened as a download (the download manager takes it); never leaves github.com
+function downloadUpdate (info = updateInfo) {
+  if (!info) return checkForUpdates(true)
+  const { owner, repo } = require('../../package.json').build.publish[0]
+  const v = String(info.version).replace(/[^\w.+-]/g, ''); const arm = process.arch === 'arm64'
+  const dmg = (info.files || []).map(f => path.posix.basename(String(f?.url || '').split('?')[0])).find(n => /^[\w. +()-]+\.dmg$/i.test(n) && /arm64/.test(n) === arm)
+  const base = `https://github.com/${owner}/${repo}/releases`
+  win?.focus()
+  newTab(dmg ? `${base}/download/v${v}/${encodeURIComponent(dmg)}` : `${base}/tag/v${v}`)
+}
+function offerDownload (info) {
+  if (!manualCheck && S.updateOffered === info.version) return // silent checks ask once per version
+  S.updateOffered = info.version; store.save()
+  updateBox({ type: 'info', buttons: ['Download', 'Later'], defaultId: 0, cancelId: 1, message: `Drift ${info.version} is available`, detail: "This copy of Drift isn't signed with an Apple Developer ID, so it can't install updates by itself. Download the new version, then drag it to Applications." })
+    .then(({ response }) => { if (response === 0) downloadUpdate(info) })
+}
+function offerRestart (info) {
+  updateBox({ type: 'info', buttons: ['Restart Now', 'Later'], message: `Drift ${info.version} is ready`, detail: 'Restart to apply the update (includes the latest Chromium security fixes).' })
+    .then(({ response }) => { if (response === 0) { store.saveNow(); autoUpdater.quitAndInstall() } })
+}
+function updateFailed (e) {
+  const message = String(e?.message || e || 'Update failed').split('\n')[0].slice(0, 200)
+  if (/code signature|did not pass validation/i.test(message) && updateInfo) { setUpdate({ status: 'available', version: updateInfo.version, message: '' }); return offerDownload(updateInfo) }
+  setUpdate({ status: 'error', message })
+  if (manualCheck) toast('Update check failed: ' + message)
+}
+async function checkForUpdates (manual = false) {
+  if (!app.isPackaged) { setUpdate({ status: 'error', message: 'Updates are checked in packaged builds only' }); if (manual) toast(upd.message); return }
+  if (upd.status === 'ready') return manual && offerRestart(upd)
+  if (upd.status === 'downloading') return manual && toast(`Downloading Drift ${upd.version}…`)
+  manualCheck = manual
+  setUpdate({ status: 'checking', message: '' })
   try {
     if (!autoUpdater) {
+      const adhoc = await isAdhocBuild()
       autoUpdater = require('electron-updater').autoUpdater
-      autoUpdater.autoDownload = true
-      autoUpdater.autoInstallOnAppQuit = true
-      autoUpdater.on('update-downloaded', (info) => {
-        dialog.showMessageBox(win, { type: 'info', buttons: ['Restart Now', 'Later'], message: `Drift ${info.version} is ready`, detail: 'Restart to apply the update (includes the latest Chromium security fixes).' })
-          .then(({ response }) => { if (response === 0) { store.saveNow(); autoUpdater.quitAndInstall() } })
+      autoUpdater.autoDownload = !adhoc
+      autoUpdater.autoInstallOnAppQuit = !adhoc
+      autoUpdater.on('update-available', async (info) => {
+        updateInfo = info
+        const a = await isAdhocBuild()
+        setUpdate({ status: a ? 'available' : 'downloading', version: info.version, percent: 0, message: '' })
+        if (a) offerDownload(info)
       })
-      autoUpdater.on('update-not-available', () => manual && toast('Drift is up to date'))
-      autoUpdater.on('error', (e) => manual && toast('Update check failed: ' + e.message))
+      autoUpdater.on('download-progress', (p) => { const percent = Math.round(p.percent || 0); if (percent !== upd.percent) setUpdate({ percent }) })
+      autoUpdater.on('update-downloaded', (info) => { setUpdate({ status: 'ready', version: info.version }); offerRestart(info) })
+      autoUpdater.on('update-not-available', () => { setUpdate({ status: 'latest', version: app.getVersion(), message: '' }); if (manualCheck) toast('Drift is up to date') })
+      autoUpdater.on('error', updateFailed)
     }
-    autoUpdater.checkForUpdates()
-  } catch (e) { if (manual) toast('Update check failed') }
+    const r = await autoUpdater.checkForUpdates()
+    r?.downloadPromise?.catch(() => {}) // failures arrive as 'error' events
+    if (!r) setUpdate({ status: 'error', message: 'Updates aren’t available in this build' })
+  } catch (e) { if (upd.status === 'checking') updateFailed(e) }
 }
 
 // ---------------------------------------------------------------- window
@@ -2902,7 +3051,7 @@ function createWindow () {
   }, 250))
   win.on('focus', () => { if (pip?.auto && pip.tabId === activeTabId()) returnVideo(pip.tabId) })
   win.on('closed', () => { for (const m of miniWindows) m.win.close() })
-  win.on('closed', () => { win = null; overlay = null; sidebarFloat = null; floatAttached = false; toastView = null; toastShown = false; views.clear(); wcToTab.clear(); live.clear() })
+  win.on('closed', () => { win = null; overlay = null; sidebarFloat = null; floatAttached = false; toastView = null; toastShown = false; clearTimeout(noticeTimer); clearTimeout(noticeDetachTimer); noticeView = null; noticeShown = false; noticeTab = null; views.clear(); wcToTab.clear(); live.clear() })
   // restore the active tab
   const sp = space()
   if (sp.activeTabId && tab(sp.activeTabId)) ensureView(sp.activeTabId)
@@ -2915,14 +3064,17 @@ function sanitizeState () {
   S.folders = S.folders && typeof S.folders === 'object' ? S.folders : {}
   const clean = (list) => list.filter(id => S.tabs[id] && !seen.has(id) && seen.add(id))
   for (const p of S.profiles) p.favorites = clean(p.favorites || [])
+  // a list holds tab ids and folder ids (Pinned and Today alike); a Today folder with nothing left in it goes
+  const keep = (id) => {
+    const f = S.folders[id]
+    if (!f) return S.tabs[id] && !seen.has(id) && seen.add(id)
+    if (seen.has(id)) return false
+    seen.add(id); f.items = clean(f.items || []); return true
+  }
   for (const sp of S.spaces) {
-    sp.pinned = (sp.pinned || []).filter(id => {
-      const f = S.folders[id]
-      if (!f) return S.tabs[id] && !seen.has(id) && seen.add(id)
-      if (seen.has(id)) return false
-      seen.add(id); f.items = clean(f.items || []); return true
-    })
-    sp.today = clean(sp.today || [])
+    sp.pinned = (sp.pinned || []).filter(keep)
+    sp.today = (sp.today || []).filter(keep)
+    pruneToday(sp)
     if (!profile(sp.profileId)) sp.profileId = 'default'
     sp.theme = cleanTheme(sp.theme || defaultTheme(sp.color), sp.color); sp.color = sp.theme.colors[0]
     if (typeof sp.icon !== 'string') sp.icon = ''
@@ -2979,7 +3131,7 @@ app.whenReady().then(() => {
     }
   }
   if (!S.settings.restoreSession && !PRIVATE) {
-    for (const sp of S.spaces) { for (const id of sp.today) { archiveEntry(S.tabs[id], sp.id); delete S.tabs[id] } sp.today = []; sp.split = null }
+    for (const sp of S.spaces) { for (const id of todayTabs(sp)) { archiveEntry(S.tabs[id], sp.id); delete S.tabs[id] } for (const id of sp.today) delete S.folders[id]; sp.today = []; sp.split = null }
     sanitizeState()
   }
   safebrowsing.start(app.getPath('userData')).then(() => console.log('threat feeds:', safebrowsing.size))
@@ -3003,7 +3155,7 @@ app.whenReady().then(() => {
   setInterval(autoArchive, 60e3)
   autoArchive()
   if (!PRIVATE && S.settings.autoUpdate) setTimeout(() => checkForUpdates(false), 10e3)
-  setInterval(() => checkForUpdates(false), 4 * HOUR)
+  setInterval(() => { if (!PRIVATE && S.settings.autoUpdate) checkForUpdates(false) }, 4 * HOUR)
   app.on('activate', () => { if (!win) createWindow() })
 })
 
@@ -3014,4 +3166,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek, get dragShield () { return dragShield }, get dragMode () { return dragMode }, restack, toast, get toastView () { return toastView }, destroyView, pipLinger })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek, get dragShield () { return dragShield }, get dragMode () { return dragMode }, restack, toast, get toastView () { return toastView }, destroyView, pipLinger, todayTabs, sanitizeState, checkForUpdates, get upd () { return upd }, get noticeView () { return noticeView }, get noticeShown () { return noticeShown } })

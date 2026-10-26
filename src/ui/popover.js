@@ -74,23 +74,43 @@ function place (d) {
   card.style.width = W + 'px'
   const a = d.anchor; const vw = innerWidth; const vh = innerHeight
   if (!a) return
+  let left
   if (d.place === 'above') {
-    const left = Math.max(8, Math.min(a.x + a.width - W + 22, vw - W - 8))
+    left = Math.max(8, Math.min(a.x + a.width - W + 22, vw - W - 8))
     card.style.left = left + 'px'; card.style.top = 'auto'; card.style.bottom = (vh - a.y + 12) + 'px'
     arrow.style.left = (a.x + a.width / 2 - 6) + 'px'; arrow.style.top = (a.y - 18) + 'px'
   } else {
-    const left = Math.max(8, Math.min(a.x + a.width / 2 - W * 0.75, vw - W - 8))
+    left = Math.max(8, Math.min(a.x + a.width / 2 - W * 0.75, vw - W - 8))
     card.style.left = left + 'px'; card.style.bottom = 'auto'; card.style.top = (a.y + a.height + 12) + 'px'
     arrow.style.left = (a.x + a.width / 2 - 6) + 'px'; arrow.style.top = (a.y + a.height + 7) + 'px'
   }
+  // the card grows out of the arrow's tip: x under the anchor, y at the edge that faces it
+  card.style.transformOrigin = (a.x + a.width / 2 - left) + 'px ' + (d.place === 'above' ? card.offsetHeight : 1) + 'px'
+}
+// Opening plays the card's entrance (body.in, restarted on every open); dismissing plays a short exit (body.out) and only
+// then tells main. Picking an item stays instant. A re-open cancels a pending close so it can't hit the next popover.
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)')
+let closeTimer = null
+function dismiss () {
+  if (closeTimer) return
+  if (reduceMotion.matches) return api.send('popover-close')
+  document.body.classList.remove('in'); document.body.classList.add('out')
+  closeTimer = setTimeout(() => { closeTimer = null; api.send('popover-close') }, 110)
 }
 api.on('popover', (d) => {
   if (!d) return
-  if (d.refresh && last) d = { ...d, anchor: last.anchor, place: last.place }
+  const refresh = !!(d.refresh && last)
+  if (refresh && closeTimer) return
+  if (refresh) d = { ...d, anchor: last.anchor, place: last.place }
   last = d
   document.documentElement.classList.toggle('light', d.dark === false)
   card.replaceChildren(...(d.kind === 'menu' ? menu(d) : site(d)))
   place(d)
+  if (refresh) return
+  clearTimeout(closeTimer); closeTimer = null
+  document.body.classList.remove('in', 'out')
+  void card.offsetWidth // flush so adding .in restarts the entrance
+  document.body.classList.add('in')
 })
-addEventListener('mousedown', (e) => { if (!card.contains(e.target)) api.send('popover-close') })
-addEventListener('keydown', (e) => { if (e.key === 'Escape') api.send('popover-close') })
+addEventListener('mousedown', (e) => { if (!card.contains(e.target)) dismiss() })
+addEventListener('keydown', (e) => { if (e.key === 'Escape') dismiss() })
