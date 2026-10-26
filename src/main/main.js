@@ -430,7 +430,7 @@ function siteName (host) {
 // A group is named after what its tabs' titles share at the end ("… - YouTube", "… · GitHub"), else after the site
 function groupName (host, ids) {
   const tails = ids.map(id => (tab(id).title || '').trim().split(/\s+[|\-–—·•:]\s+/)).map(p => (p.length > 1 ? p[p.length - 1].trim() : ''))
-  const shared = tails[0] && tails.every(x => x.toLowerCase() === tails[0].toLowerCase()) ? tails[0].slice(0, 30) : ''
+  const shared = tails[0] && tails[0].length <= 30 && tails.every(x => x.toLowerCase() === tails[0].toLowerCase()) ? tails[0] : ''
   return shared || siteName(host)
 }
 // Exact-duplicate URLs (never the active tab or a split tab) and the loose Today tabs of each site
@@ -2720,6 +2720,8 @@ function noticeBounds () {
 }
 function showTabNotice (id) {
   if (!win || win.isDestroyed()) return
+  const page = views.get(activeTabId())?.webContents; const hadFocus = !!page && page.isFocused() // a fresh view takes focus on its first load
+  const keepFocus = () => { if (hadFocus && !page.isDestroyed() && !overlayOpen) page.focus() }
   if (!noticeView) {
     noticeView = new WebContentsView({ webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } })
     noticeView.setBackgroundColor('#00000000')
@@ -2729,8 +2731,8 @@ function showTabNotice (id) {
   }
   clearTimeout(noticeDetachTimer)
   noticeTab = id; noticeShown = true
-  noticeView.setBounds(noticeBounds()); restack()
-  const send = () => noticeView?.webContents.send('notice', { text: 'New Tab Created', color: space().theme.colors[0], dark: popoverDark() })
+  noticeView.setBounds(noticeBounds()); restack(); keepFocus()
+  const send = () => { noticeView?.webContents.send('notice', { text: 'New Tab Created', color: space().theme.colors[0], dark: popoverDark() }); keepFocus() }
   if (noticeView.webContents.isLoading()) noticeView.webContents.once('did-finish-load', send); else send()
   armNotice(3500)
 }
@@ -2739,7 +2741,7 @@ function hideTabNotice ({ now = false } = {}) {
   clearTimeout(noticeTimer); clearTimeout(noticeDetachTimer)
   if (!noticeShown || !noticeView) return
   const detach = () => { noticeShown = false; noticeTab = null; try { win?.contentView.removeChildView(noticeView) } catch {} }
-  if (now) return detach()
+  if (now || noticeView.webContents.isDestroyed()) return detach()
   noticeView.webContents.send('notice', null)
   noticeDetachTimer = setTimeout(detach, 180)
 }
@@ -3153,7 +3155,7 @@ app.whenReady().then(() => {
   setInterval(autoArchive, 60e3)
   autoArchive()
   if (!PRIVATE && S.settings.autoUpdate) setTimeout(() => checkForUpdates(false), 10e3)
-  setInterval(() => checkForUpdates(false), 4 * HOUR)
+  setInterval(() => { if (!PRIVATE && S.settings.autoUpdate) checkForUpdates(false) }, 4 * HOUR)
   app.on('activate', () => { if (!win) createWindow() })
 })
 

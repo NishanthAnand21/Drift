@@ -2,8 +2,8 @@
 
 | Mac | Download |
 |---|---|
-| Apple Silicon (M1–M4) | `Drift-1.0.2-arm64.dmg` |
-| Intel | `Drift-1.0.2.dmg` |
+| Apple Silicon (M1–M4) | `Drift-1.0.3-arm64.dmg` |
+| Intel | `Drift-1.0.3.dmg` |
 
 Open the DMG and drag **Drift** to Applications. This build is ad-hoc signed, not signed with an Apple Developer ID, so on the first launch macOS will say it can't verify the app. To open it, right-click → **Open**, or go to **System Settings → Privacy & Security → Open Anyway**. Alternatively, run:
 
@@ -12,6 +12,18 @@ xattr -dr com.apple.quarantine /Applications/Drift.app
 ```
 
 **Updating:** download the new DMG and replace the app in Applications. On first launch macOS asks once for your login keychain password ("Drift Safe Storage"). Enter it and click **Always Allow**, and your cookies and saved passwords carry over. This happens once per update until releases are signed with an Apple Developer ID (see the README); automatic updates need that too.
+
+## What's new in 1.0.3
+
+- **Background tabs, like Arc:** "Open Link in New Tab" and ⌘-click open the page without leaving yours, and a "New Tab Created" pill appears at the top right. Click it to go to the new tab.
+- **Tidy works:** it groups Today's tabs from the same site into named folders (for example "GitHub" or "YouTube") and archives duplicates. Today can now hold folders.
+- **Check for Updates reports back:** Settings shows the result. This copy of Drift isn't signed with an Apple Developer ID, so it can't install updates by itself; it offers to download the new version instead. Automatic checks follow the auto-update setting.
+- **Smoother, Arc-style motion:**
+  - press and hover feedback on buttons, tabs, favourites and space dots
+  - the command bar and popovers animate in and out
+  - softer floating-sidebar slide and toasts
+  - Reduce Motion is respected
+- **Groundwork:** an Arc sidebar importer module (the menu item comes next).
 
 ## What's new in 1.0.2
 
@@ -62,4 +74,4 @@ xattr -dr com.apple.quarantine /Applications/Drift.app
 
 ## Quality
 
-Before this release, 115 end-to-end checks passed on both the development build and the packaged, fused build. `npm audit` reports 0 vulnerabilities, and Electronegativity found nothing high-severity.
+Before this release, 122 end-to-end checks passed on both the development build and the packaged, fused build. `npm audit` reports 0 vulnerabilities, and Electronegativity found nothing high-severity.
