@@ -69,10 +69,20 @@ function row (r, i) {
     const t = document.createElement('span'); t.className = 't'; t.textContent = r.title || r.url; el.append(t)
     const u = document.createElement('span'); u.className = 'u'; u.textContent = r.url ? host(r.url) : (r.sub || ''); el.append(u)
     if (r.k) { const k = document.createElement('span'); k.className = 'k'; k.textContent = r.k; el.append(k) }
-    el.onmousemove = () => { if (sel !== i) { sel = i; mark() } }
+    el.onmousemove = (e) => { if (pointerMoved(e) && sel !== i) { sel = i; mark() } }
     el.onclick = () => { sel = i; submit() }
     return el
   }
+}
+// Only a real mouse movement picks the row under the pointer. Chromium also fires mousemove when the
+// list redraws under a still pointer (every keystroke), which used to move the selection off what you
+// typed, so Enter after ⌘L opened a hovered tab or history entry instead
+let lastPointer = null
+function pointerMoved (e) {
+  const p = e.screenX + ',' + e.screenY
+  if (lastPointer === null) { lastPointer = p; return false }
+  if (p === lastPointer) return false
+  lastPointer = p; return true
 }
 function mark () { warm(); const rows = [...resEl.querySelectorAll('.r')]; rows.forEach((c, i) => c.classList.toggle('sel', i === sel)); rows[sel]?.scrollIntoView({ block: 'nearest' }) }
 let warmTimer = null
@@ -114,7 +124,7 @@ document.getElementById('backdrop').onmousedown = close
 
 const TITLES = { split: 'Open in split view', archive: 'Archived tabs', edit: '' , new: '' }
 api.on('open', (o) => {
-  O = o; sel = 0; sugg = []; aiMode = null
+  O = o; sel = 0; sugg = []; aiMode = null; lastPointer = null
   document.documentElement.style.setProperty('--space', o.snapshot.color)
   document.body.className = ['find', 'peek', 'report'].includes(o.mode) ? o.mode : ''
   if (o.mode === 'peek') { document.getElementById('peekurl').textContent = o.query; document.getElementById('peektitle').textContent = '' }

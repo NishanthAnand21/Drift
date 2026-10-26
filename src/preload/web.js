@@ -12,6 +12,58 @@ document.addEventListener('click', (e) => {
   ipcRenderer.send('peek-link', a.href)
 }, true)
 
+// Two-finger swipe left/right → back/forward (Electron has no history swipe of its own on macOS), and
+// the mouse's back/forward buttons. Only real input counts; a swipe the page scrolls or handles itself
+// (carousels, maps) is left to the page. An arrow slides in from the edge as you swipe, like Chrome.
+;(() => {
+  const NEED = 140 // px of horizontal travel
+  let acc = 0; let idle = null; let done = false; let skip = false; let dot = null; let host = null
+  const scrollsX = (start, dx) => {
+    for (let n = start; n && n.nodeType === 1; n = n.parentElement) {
+      if (n.scrollWidth > n.clientWidth + 1 && /(auto|scroll|overlay)/.test(getComputedStyle(n).overflowX)) {
+        if (dx < 0 ? n.scrollLeft > 0 : n.scrollLeft + n.clientWidth < n.scrollWidth - 1) return true
+      }
+    }
+    const se = document.scrollingElement
+    return !!se && se.scrollWidth > se.clientWidth + 1 && (dx < 0 ? se.scrollLeft > 0 : se.scrollLeft + se.clientWidth < se.scrollWidth - 1)
+  }
+  function arrow (p, back) {
+    if (!p) { if (host) host.style.display = 'none'; return }
+    if (!host) {
+      // styled through the CSSOM only, so a page's Content-Security-Policy can't strip it
+      host = document.createElement('drift-swipe')
+      Object.assign(host.style, { position: 'fixed', left: '0', top: '0', width: '0', height: '0', zIndex: '2147483647', pointerEvents: 'none' })
+      const sh = host.attachShadow({ mode: 'closed' })
+      dot = document.createElement('div')
+      Object.assign(dot.style, { position: 'fixed', top: '50%', width: '42px', height: '42px', marginTop: '-21px', borderRadius: '50%', display: 'grid', placeItems: 'center', color: '#fff', font: '600 20px -apple-system,system-ui,sans-serif', boxShadow: '0 4px 14px rgba(0,0,0,.25)', transition: 'background .12s' })
+      sh.append(dot); document.documentElement.appendChild(host)
+    }
+    host.style.display = 'block'
+    dot.textContent = back ? '←' : '→'
+    const x = (-46 + p * 64) + 'px'
+    dot.style.left = back ? x : ''; dot.style.right = back ? '' : x
+    dot.style.opacity = String(Math.min(1, p * 1.5))
+    dot.style.background = p >= 1 ? '#7c5cff' : 'rgba(29,26,36,.85)'
+  }
+  addEventListener('wheel', (e) => {
+    if (!e.isTrusted || e.ctrlKey) return
+    clearTimeout(idle); idle = setTimeout(() => { acc = 0; done = false; skip = false; arrow(0) }, 180)
+    if (done || skip) return
+    if (!acc) {
+      if (Math.abs(e.deltaX) < 3 || Math.abs(e.deltaX) < Math.abs(e.deltaY) * 1.5) return // vertical scrolling
+      if (e.defaultPrevented || scrollsX(e.target, e.deltaX)) { skip = true; return } // the page uses it
+    }
+    acc += e.deltaX
+    const back = acc < 0; const p = Math.min(1, Math.abs(acc) / NEED)
+    arrow(p, back)
+    if (p >= 1) { done = true; setTimeout(() => arrow(0), 160); ipcRenderer.send('web-nav', back ? 'back' : 'forward') }
+  }, { passive: true })
+  addEventListener('mouseup', (e) => {
+    if (!e.isTrusted) return
+    if (e.button === 3) ipcRenderer.send('web-nav', 'back'); else if (e.button === 4) ipcRenderer.send('web-nav', 'forward')
+  }, true)
+})()
+
 const secureCtx = location.protocol === 'https:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
 if (secureCtx) {
   let host = null; let shadow = null; let menuFor = null

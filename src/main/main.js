@@ -54,6 +54,8 @@ function showErrorPage (wc, params) {
   wc.loadURL('data:text/html;charset=utf-8;base64,' + errorHtml.toString('base64') + '#' + new URLSearchParams(params).toString()).catch(() => {})
 }
 const isInternalPage = (u) => typeof u === 'string' && u.startsWith('data:text/html')
+// The address an error / warning page stands in for (it's in the page's #fragment)
+const failedUrlOf = (u) => { try { return new URLSearchParams(new URL(u).hash.slice(1)).get('url') } catch { return null } }
 
 // Sandbox every renderer (skipped only when running as root, e.g. Linux CI containers)
 if (process.getuid?.() !== 0) app.enableSandbox()
@@ -519,9 +521,33 @@ function ensureView (tabId) {
   wireWebContents(tabId, wc)
   extFor(tabId)?.addTab(wc, win)
   const vis = visualFile(t.url)
+  // re-checked here too: it comes back from the state file
+  const saved = t.nav?.entries?.[t.nav.index]?.url === t.url && t.nav.entries.every(e => isSafeWebUrl(e?.url)) ? t.nav : null
   if (vis) showVisual(wc, vis)
+  // bring back the tab's back/forward list (after a restart, or when Memory Saver unloaded it)
+  else if (saved && saved.entries.length > 1) wc.navigationHistory.restore({ entries: saved.entries, index: saved.index }).catch(() => {})
   else wc.loadURL(t.url && isSafeWebUrl(t.url) ? t.url : 'about:blank').catch(() => {})
   return view
+}
+// The tab's back/forward list (web pages only, at most 50 around the current one) so it survives
+// unloading and restarts
+function saveNav (t, wc) {
+  if (PRIVATE || !t || wc.isDestroyed()) return
+  const nh = wc.navigationHistory; const all = nh.getAllEntries(); const at = nh.getActiveIndex()
+  const keep = all.map((e, i) => ({ url: e.url, title: String(e.title || '').slice(0, 200), i })).filter(e => e.url.length <= 2048 && isSafeWebUrl(e.url) && !isInternalPage(e.url))
+  const cur = keep.findIndex(e => e.i === at)
+  if (cur < 0) return
+  const from = Math.max(0, Math.min(cur - 40, keep.length - 50))
+  const entries = keep.slice(from, from + 50)
+  t.nav = { entries: entries.map(({ url, title }) => ({ url, title })), index: cur - from }
+}
+// A failed load leaves two entries — the failed address and our error page for it. Keep one, so Back
+// goes to the page before (it used to land on the failed address, fail again and trap you); a
+// successful retry replaces the error page the same way.
+function tidyHistory (wc, url) {
+  const nh = wc.navigationHistory; const i = nh.getActiveIndex(); if (i < 1) return
+  const prev = nh.getEntryAtIndex(i - 1)?.url
+  if (isInternalPage(url) ? prev === failedUrlOf(url) : isInternalPage(prev) && failedUrlOf(prev) === url) nh.removeEntryAtIndex(i - 1)
 }
 
 function destroyView (tabId) {
@@ -543,6 +569,7 @@ function wireWebContents (tabId, wc) {
     if (!st() || wc.isDestroyed()) return
     st().canBack = wc.navigationHistory.canGoBack()
     st().canFwd = wc.navigationHistory.canGoForward()
+    saveNav(t(), wc)
     pushStateSoon()
   }
   wc.on('did-start-loading', () => { if (st()) st().loading = true; pushStateSoon() })
@@ -554,6 +581,7 @@ function wireWebContents (tabId, wc) {
   wc.once('destroyed', () => inspector.forget(wc.id))
   wc.on('did-stop-loading', () => { if (st()) st().loading = false; updateNav(); setTimeout(() => snapshotTab(tabId), 1200) })
   wc.on('did-navigate', (_e, url) => {
+    try { tidyHistory(wc, url) } catch {}
     if (isInternalPage(url)) return updateNav() // our error / warning / visual page
     if (t()) { t().url = url; store.save() }
     if (st()) st().blocked = 0
@@ -705,9 +733,9 @@ function pageContextMenu (tabId, wc, p) {
     items.push({ role: 'copy' }, { label: `Search for “${q}”`, click: () => newTab(normalizeInput(q.includes(' ') ? q : q + ' ')) }, { type: 'separator' })
   }
   items.push(
-    { label: 'Back', enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() },
-    { label: 'Forward', enabled: wc.navigationHistory.canGoForward(), click: () => wc.navigationHistory.goForward() },
-    { label: 'Reload', click: () => wc.reload() },
+    { label: 'Back', enabled: wc.navigationHistory.canGoBack(), click: () => goBack(wc) },
+    { label: 'Forward', enabled: wc.navigationHistory.canGoForward(), click: () => goForward(wc) },
+    { label: 'Reload', click: () => reloadPage(wc) },
     { type: 'separator' },
     { label: 'Copy Page URL', click: () => copyUrl(tabId) },
     { label: 'Inspect Element', click: () => wc.inspectElement(p.x, p.y) })
@@ -728,8 +756,9 @@ function newTab (url, { spaceId = S.activeSpaceId, activate = true } = {}) {
   return id
 }
 
-function activateTab (tabId) {
+function activateTab (tabId, { from } = {}) {
   if (!tab(tabId)) return
+  const shown = from !== undefined ? from : activeTabId() // the tab on screen, even in the space we're leaving
   const loc = locate(tabId)
   if (loc?.space && loc.space.id !== S.activeSpaceId) S.activeSpaceId = loc.space.id
   const sp = space()
@@ -737,7 +766,7 @@ function activateTab (tabId) {
   if (prev && prev !== tabId) snapshotTab(prev)
   hideFavPreview()
   if (popoverOpen) closePopover()
-  if (S.settings.pipOnLeave && prev && prev !== tabId && views.has(prev) && !(inSplit(sp, prev) && inSplit(sp, tabId))) popOutVideo(prev, { auto: true })
+  popOutOnLeave(shown, tabId)
   if (pip?.auto && pip.tabId === tabId) returnVideo(tabId)
 
   sp.activeTabId = tabId
@@ -952,6 +981,19 @@ function unsplit () {
   const sp = space(); if (!sp.split) return
   sp.split = null; layout(); pushState(); store.save()
 }
+// The split button in a pane's toolbar
+function splitMenu (id) {
+  const sp = space(); if (!sp.split) return
+  const row = sp.split.dir !== 'col'
+  Menu.buildFromTemplate([
+    { label: row ? 'Stack Panes Vertically' : 'Place Panes Side by Side', click: () => setSplitDir(row ? 'col' : 'row') },
+    { label: 'Make Panes Equal', click: () => ACTIONS['split-equalize']() },
+    { label: 'Add Tab to Split View…', enabled: sp.split.ids.length < MAX_SPLIT, click: () => runCommand('split') },
+    { type: 'separator' },
+    { label: 'Remove This Tab from Split View', click: () => ACTIONS['pane-close'](id) },
+    { label: 'Separate All Tabs', click: () => unsplit() }
+  ]).popup(menuOpts())
+}
 
 // ---------------------------------------------------------------- spaces & profiles
 function createSpace (name, { newProfile = false } = {}) {
@@ -973,10 +1015,11 @@ function mostRecentTab (sp) {
 }
 function switchSpace (id) {
   const sp = space(id); if (!sp) return
+  const leaving = activeTabId()
   S.activeSpaceId = id
   const target = sp.activeTabId && tab(sp.activeTabId) ? sp.activeTabId : mostRecentTab(sp)
-  if (target) activateTab(target)
-  else { sp.activeTabId = null; layout(); pushState(); win.webContents.focus() }
+  if (target) activateTab(target, { from: leaving })
+  else { popOutOnLeave(leaving, null); sp.activeTabId = null; layout(); pushState(); win.webContents.focus() }
   store.save()
 }
 
@@ -1009,6 +1052,7 @@ function addHistory (url, title) {
 
 // ---------------------------------------------------------------- layout
 const SIDEBAR_MIN = 200; const SIDEBAR_MAX = 420; const PAD = 8
+const PANE_BAR = 36 // each split-view pane has its own toolbar (drawn by the sidebar UI, above the page)
 
 function layout () {
   if (!win) return
@@ -1021,7 +1065,7 @@ function layout () {
   else if (act) needed.push(act)
   if (htmlFullscreen && views.has(htmlFullscreen)) needed.splice(0, needed.length, htmlFullscreen)
 
-  for (const [id, v] of views) if (!needed.includes(id)) { try { win.contentView.removeChildView(v) } catch {} }
+  for (const [id, v] of views) if (!needed.includes(id) && !pipLinger.has(id)) { try { win.contentView.removeChildView(v) } catch {} }
   // only the docked sidebar takes room; the peeked one floats over the page (placeSidebarFloat)
   const sw = S.sidebarVisible ? S.settings.sidebarWidth : 0
   const x0 = sw || PAD
@@ -1041,7 +1085,8 @@ function layout () {
     const v = ensureView(id)
     if (htmlFullscreen) { v.setBounds({ x: 0, y: 0, width: w, height: h }); v.setBorderRadius?.(0); return v }
     v.setBorderRadius?.(10)
-    v.setBounds(rects[i])
+    const r = rects[i]
+    v.setBounds(needed.length > 1 ? { x: r.x, y: r.y + PANE_BAR, width: r.width, height: r.height - PANE_BAR } : r)
     return v
   })
   placeSidebarFloat()
@@ -1059,7 +1104,8 @@ let shownTabs = []; let shownPanels = []
 function restack () {
   if (!win || win.isDestroyed()) return
   const open = new Set(views.values()); const alive = (v) => v && !v.webContents.isDestroyed()
-  const want = [...shownTabs.filter(v => open.has(v)), ...shownPanels.filter(alive), floatAttached && sidebarFloat, toastShown && toastView, previewFor && previewView, popoverOpen && popView,
+  const lingering = [...pipLinger].map(id => views.get(id)).filter(v => v && !shownTabs.includes(v))
+  const want = [...lingering, ...shownTabs.filter(v => open.has(v)), ...shownPanels.filter(alive), floatAttached && sidebarFloat, toastShown && toastView, previewFor && previewView, popoverOpen && popView,
     overlayOpen && overlay, peekView, dragMode && dragShield].filter(Boolean)
   const kids = win.contentView.children
   let prev = -1; let i = 0
@@ -1467,23 +1513,38 @@ function openPrivateWindow () {
 // Uses Chromium's native PiP window: movable, resizable, and on macOS it floats above every app.
 let pip = null // { tabId, auto } — auto: Drift popped it out and will bring it back
 const PIP_IN = `(async () => {
-  const vids = [...document.querySelectorAll('video')].filter(v => !v.paused && !v.ended && v.readyState > 2 && !v.disablePictureInPicture)
+  const vids = [...document.querySelectorAll('video')].filter(v => !v.paused && !v.ended && v.readyState >= 2 && !v.disablePictureInPicture)
   if (!vids.length) return false
   const v = vids.sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0]
   if (document.pictureInPictureElement === v) return true
   try { await v.requestPictureInPicture(); return true } catch { return false }
 })()`
 const PIP_OUT = `(async () => { if (!document.pictureInPictureElement) return false; await document.exitPictureInPicture().catch(() => {}); return true })()`
+// Run in the page (where the video usually is) first, then in its frames all at once. Each frame gets a
+// time limit: going one by one, a slow ad frame on YouTube could hold the pop-out up until it was too late.
+const within = (p, ms) => Promise.race([Promise.resolve(p).catch(() => false), new Promise(r => setTimeout(() => r(false), ms))])
 async function inFrames (wc, code) {
-  for (const f of wc.mainFrame.framesInSubtree) { try { if (await f.executeJavaScript(code, true)) return true } catch {} }
-  return false
+  const main = wc.mainFrame
+  if (await within(main.executeJavaScript(code, true), 1500)) return true
+  const subs = main.framesInSubtree.filter(f => f !== main)
+  return (await Promise.all(subs.map(f => within(f.executeJavaScript(code, true), 1500)))).some(Boolean)
 }
 async function popOutVideo (tabId, { auto = false } = {}) {
   const v = views.get(tabId); if (!v || v.webContents.isDestroyed()) return false
-  if (auto && siteFlag(tabId, 'noPip')) return false
+  if (auto && (siteFlag(tabId, 'noPip') || !live.get(tabId)?.audible)) return false // only something that's playing
   const ok = await inFrames(v.webContents, PIP_IN)
   if (ok) pip = { tabId, auto }
   return ok
+}
+// Leaving a tab with a video playing: pop it out while that tab is still on screen (under the new
+// one). Detached first, Chromium treats it as hidden and can stop drawing the video, so the pop-out
+// failed or came up black.
+const pipLinger = new Set() // tabIds kept attached under the new tab until their pop-out is done
+function popOutOnLeave (prev, next) {
+  if (!S.settings.pipOnLeave || !prev || prev === next || !views.has(prev) || !live.get(prev)?.audible) return
+  const sp = space(); if (inSplit(sp, prev) && inSplit(sp, next)) return
+  pipLinger.add(prev)
+  popOutVideo(prev, { auto: true }).finally(() => { pipLinger.delete(prev); layout() })
 }
 async function returnVideo (tabId) {
   const v = views.get(tabId)
@@ -1911,6 +1972,13 @@ function destroyPeek () {
   if (!peekView.webContents.isDestroyed()) peekView.webContents.close()
   peekView = null
 }
+// Two-finger swipe and the mouse's back/forward buttons, reported by the page preload (Electron has
+// no history swipe of its own on macOS). Only from tabs, Peek and Little Windows.
+ipcMain.on('web-nav', (e, dir) => {
+  const wc = e.sender
+  if (!wcToTab.has(wc.id) && wc !== peekView?.webContents && ![...miniWindows].some(m => m.view?.webContents === wc)) return
+  if (dir === 'back') goBack(wc); else if (dir === 'forward') goForward(wc)
+})
 ipcMain.on('peek-link', (e, url) => {
   if (!wcToTab.has(e.sender.id) || !S.settings.peekShift || typeof url !== 'string') return
   openPeek(url)
@@ -2425,6 +2493,7 @@ async function clearBrowsingData () {
     const ses = getSession(p.id)
     await ses.clearStorageData(); await ses.clearCache(); await ses.clearAuthCache()
   }
+  for (const t of Object.values(S.tabs)) delete t.nav
   S.history = []; S.archive = []; S.permissions = {}; store.save(); toast('Browsing data cleared')
 }
 
@@ -2437,6 +2506,14 @@ function findInPage () { if (activeTabId()) openOverlay({ mode: 'find', query: '
 function toggleSidebar () { S.sidebarVisible = !S.sidebarVisible; sidebarPeek = false; clearTimeout(peekTimer); sidebarFloat?.webContents.send('sidebar-peek', false); store.save(); layout(); pushState() }
 
 function navActive (fn) { const wc = views.get(activeTabId())?.webContents; if (wc) fn(wc) }
+// Reload; on one of our error pages that means trying the address that failed again
+function reloadPage (wc, { toggle = false } = {}) {
+  if (toggle && wc.isLoading()) return wc.stop()
+  const failed = isInternalPage(wc.getURL()) && failedUrlOf(wc.getURL())
+  if (failed && isSafeWebUrl(failed)) wc.loadURL(failed).catch(() => {}); else wc.reload()
+}
+function goBack (wc) { if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack() }
+function goForward (wc) { if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward() }
 
 function tabContextMenu (tabId) {
   const loc = locate(tabId); if (!loc) return
@@ -2521,6 +2598,7 @@ function pushState () {
     today: sp.today.map(t).filter(Boolean),
     activeTabId: act,
     split: sp.split,
+    panes: sp.split && sp.split.ids.every(id => tab(id)) ? sp.split.ids.map(id => { const x = tab(id); const l = live.get(id); return { id, url: x.url, title: x.customTitle || x.title, canBack: !!l?.canBack, canFwd: !!l?.canFwd, loading: !!l?.loading } }) : null,
     sidebarVisible: S.sidebarVisible,
     sidebarPeek,
     chatOpen,
@@ -2582,9 +2660,9 @@ const ACTIONS = {
   'folder-menu': (fid) => folderMenu(fid),
   'new-folder': () => newFolder(),
   'command-bar': (mode) => commandBar(mode),
-  back: () => navActive(wc => wc.navigationHistory.goBack()),
-  forward: () => navActive(wc => wc.navigationHistory.goForward()),
-  reload: () => navActive(wc => wc.isLoading() ? wc.stop() : wc.reload()),
+  back: () => navActive(goBack),
+  forward: () => navActive(goForward),
+  reload: () => navActive(wc => reloadPage(wc, { toggle: true })),
   'toggle-sidebar': toggleSidebar,
   'sidebar-width': (w) => { setSidebarWidth(Number(w)); store.save() },
   'sidebar-resize-start': () => { if (S.sidebarVisible) startShieldDrag('sidebar', 'row') },
@@ -2595,6 +2673,19 @@ const ACTIONS = {
   'split-drag-end': () => endSplitDrag(),
   'split-equalize': () => { const sp = space(); if (sp.split) { sp.split.sizes = sp.split.ids.map(() => 1 / sp.split.ids.length); layout(); store.save() } },
   'split-focus': (id) => { if (inSplit(space(), id)) activateTab(id) },
+  'pane-nav': (id, what) => {
+    const wc = inSplit(space(), id) && views.get(id)?.webContents; if (!wc) return
+    if (what === 'back') goBack(wc); else if (what === 'forward') goForward(wc); else if (what === 'reload') reloadPage(wc, { toggle: true })
+  },
+  'pane-url': (id) => { if (inSplit(space(), id)) { activateTab(id); commandBar('edit') } },
+  'pane-site': (id, rect) => { if (inSplit(space(), id)) { activateTab(id); siteControls(rect && { x: +rect.x, y: +rect.y, width: +rect.width, height: +rect.height }) } },
+  'pane-menu': (id) => { if (inSplit(space(), id)) { activateTab(id); splitMenu(id) } },
+  'pane-close': (id) => { const sp = space(); if (!inSplit(sp, id)) return; removeFromSplit(sp, id); layout(); pushState(); store.save() },
+  // two-finger swipe across the sidebar: next / previous space (stops at the ends, like Arc)
+  'step-space': (dir) => {
+    const i = S.spaces.findIndex(s => s.id === S.activeSpaceId); const j = i + (Number(dir) > 0 ? 1 : -1)
+    if (j >= 0 && j < S.spaces.length) switchSpace(S.spaces[j].id)
+  },
   unsplit,
   mute: (id) => toggleMute(id),
   'open-download': (p) => { if (downloads.some(d => d.path === p)) shell.showItemInFolder(p) },
@@ -2707,7 +2798,7 @@ function buildMenu () {
       label: 'View',
       submenu: [
         { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+S', click: toggleSidebar },
-        { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => navActive(wc => wc.reload()) },
+        { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => navActive(reloadPage) },
         { label: 'Hard Reload', accelerator: 'CmdOrCtrl+Shift+R', click: () => navActive(wc => wc.reloadIgnoringCache()) },
         { type: 'separator' },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => zoom(1) },
@@ -2792,6 +2883,8 @@ function createWindow () {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.once('ready-to-show', () => win.show())
   win.on('resize', layout)
+  win.on('swipe', (_e, dir) => { if (dir === 'right') navActive(goBack); else if (dir === 'left') navActive(goForward) })
+  win.on('app-command', (_e, cmd) => { if (cmd === 'browser-backward') navActive(goBack); else if (cmd === 'browser-forward') navActive(goForward) })
   win.on('enter-full-screen', pushState)
   win.on('leave-full-screen', () => { if (htmlFullscreen) navActive(wc => wc.executeJavaScript('document.fullscreenElement && document.exitFullscreen()').catch(() => {})); pushState() })
   win.on('close', () => store.saveNow())
@@ -2914,4 +3007,4 @@ app.on('will-quit', () => {
   if (privateDir) try { fs.rmSync(privateDir, { recursive: true, force: true }) } catch {} })
 
 // test hook: DRIFT_SELFTEST=1 runs a scripted smoke test then exits
-if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek, get dragShield () { return dragShield }, get dragMode () { return dragMode }, restack, toast, get toastView () { return toastView } })
+if (process.env.DRIFT_SELFTEST) require('./selftest')({ app, get win () { return win }, get S () { return S }, newTab, activateTab, openSplit, togglePin, toggleFavorite, createSpace, switchSpace, closeTab, autoArchive, views, live, layout, commandBar, closeOverlay, runCommand, ACTIONS, get passwords () { return passwords }, get peekView () { return peekView }, miniWindows, get settingsWin () { return settingsWin }, get chatView () { return chatView }, get claudeWeb () { return claudeWeb }, get claudeBar () { return claudeBar }, setClaudeMode, addPageToClaude, chatMenu, popOutVideo, returnVideo, get pip () { return pip }, showFavPreview, get previewView () { return previewView }, scrapeGmail, snapshots, updateSpace, safebrowsing, preconnect, tabMemory, createVisual, exportVisualPdf, visualFile, finder, plusMenu, siteControls, newFolder, deleteFolder, pinnedTabs, get popView () { return popView }, get popoverOpen () { return popoverOpen }, setSiteSetting, siteControlsData, screenshotPage, downloads, get downloadThumbs () { return downloadThumbs }, startSplitDrag, splitDrag, endSplitDrag, setSplitDir, removeFromSplit, get lastLayout () { return lastLayout }, get chatOpen () { return chatOpen }, inspector, adblock, setSetting, mcpConfigFile, mcpBridgePath, tidyTitle, tidyTabs, memorySaver, openInspector, openPeek, openMini, openSettings, toggleChat, tidyDownloadName, runSync, tab, space, get overlayOpen () { return overlayOpen }, get overlay () { return overlay }, get sidebarFloat () { return sidebarFloat }, setPeek, get dragShield () { return dragShield }, get dragMode () { return dragMode }, restack, toast, get toastView () { return toastView }, destroyView, pipLinger })
