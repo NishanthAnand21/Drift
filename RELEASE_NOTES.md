@@ -2,8 +2,8 @@
 
 | Mac | Download |
 |---|---|
-| Apple Silicon (M1–M4) | `Drift-1.0.1-arm64.dmg` |
-| Intel | `Drift-1.0.1.dmg` |
+| Apple Silicon (M1–M4) | `Drift-1.0.2-arm64.dmg` |
+| Intel | `Drift-1.0.2.dmg` |
 
 Open the DMG and drag **Drift** to Applications. This build is ad-hoc signed, not signed with an Apple Developer ID, so on the first launch macOS will say it can't verify the app. To open it, right-click → **Open**, or go to **System Settings → Privacy & Security → Open Anyway**. Alternatively, run:
 
@@ -11,7 +11,21 @@ Open the DMG and drag **Drift** to Applications. This build is ad-hoc signed, no
 xattr -dr com.apple.quarantine /Applications/Drift.app
 ```
 
-**Updating from 1.0.0:** download the new DMG and replace the app in Applications. Automatic updates need a Developer ID–signed build, and this one is ad-hoc signed.
+**Updating:** download the new DMG and replace the app in Applications. On first launch macOS asks once for your login keychain password ("Drift Safe Storage"). Enter it and click **Always Allow**, and your cookies and saved passwords carry over. This happens once per update until releases are signed with an Apple Developer ID (see the README); automatic updates need that too.
+
+## What's new in 1.0.2
+
+- **Back and forward work everywhere.**
+  - The ← → buttons, ⌘[ / ⌘], a two-finger swipe on the page (an arrow slides in from the edge), a three-finger swipe, and the mouse's back/forward buttons.
+  - Tabs keep their history when they're unloaded to save memory and after a restart.
+  - A page that fails to load no longer traps Back, and Reload on it tries again.
+- **⌘L opens what you typed.** Enter could open the result under a resting mouse pointer instead.
+- **Split view like Arc.**
+  - Every pane has its own toolbar: back, forward, reload, its address, site controls, a split menu and ×.
+  - The split's tabs show as one combined row in the sidebar.
+- **Swipe between spaces:** a two-finger swipe across the sidebar moves to the next or previous space.
+- **Picture-in-picture is more reliable:** a playing video now pops out every time you switch tabs or spaces.
+- **For developers:** `ARCHITECTURE.md` (process model and security invariants) and `npm run doctor` (environment check).
 
 ## What's new in 1.0.1
 
@@ -48,4 +62,4 @@ xattr -dr com.apple.quarantine /Applications/Drift.app
 
 ## Quality
 
-Before this release, 106 end-to-end checks passed on both the development build and the packaged, fused build. `npm audit` reports 0 vulnerabilities, and Electronegativity found nothing high-severity.
+Before this release, 115 end-to-end checks passed on both the development build and the packaged, fused build. `npm audit` reports 0 vulnerabilities, and Electronegativity found nothing high-severity.

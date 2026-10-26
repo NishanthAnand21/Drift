@@ -31,6 +31,26 @@ Open the `.dmg` and drag **Drift** into Applications. Unsigned builds need a rig
 
 Regenerate the icon from `build/icon.svg` with `npm run icon`.
 
+### Signed releases (Developer ID)
+
+Release builds are ad-hoc signed until the repository has Apple signing secrets. An ad-hoc build is a "new app" to macOS each time, so every update asks once for your login keychain password ("Drift Safe Storage"). With a Developer ID:
+- that prompt stops after the first signed version
+- the "can't verify" warning goes away
+- automatic updates work
+
+To set it up:
+1. Join the [Apple Developer Program](https://developer.apple.com/programs/) ($99/year).
+2. Create a **Developer ID Application** certificate. In Xcode, open Settings → Accounts → Manage Certificates. Then, in Keychain Access, export the certificate with its private key as a `.p12` file with a password.
+3. Create an app-specific password at [account.apple.com](https://account.apple.com), under Sign-In and Security.
+4. In the GitHub repository, go to **Settings → Secrets and variables → Actions** and add:
+   - `MAC_CERT_P12_BASE64`: the output of `base64 -i DeveloperID.p12 | pbcopy`
+   - `MAC_CERT_PASSWORD`: the `.p12` password
+   - `APPLE_ID`: your Apple Account email
+   - `APPLE_APP_SPECIFIC_PASSWORD`
+   - `APPLE_TEAM_ID`: shown on the Membership page
+
+The next release is then signed and notarised automatically. A self-signed certificate doesn't help: macOS identifies apps without an Apple Team ID by a fingerprint of each build.
+
 ## Features
 
 | Feature | How |

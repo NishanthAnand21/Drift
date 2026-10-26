@@ -1,7 +1,7 @@
 {
   "name": "drift-browser",
   "productName": "Drift",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Drift — a calm, sidebar-first Chromium browser for macOS",
   "main": "src/main/main.js",
   "author": "Nishanth Anand",
