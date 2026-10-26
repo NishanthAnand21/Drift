@@ -14,7 +14,8 @@
     "release": "electron-builder --mac --publish always",
     "postinstall": "node scripts/bundle-preload.js",
     "prestart": "node scripts/bundle-preload.js",
-    "security": "npm audit --omit=dev && npx --yes @doyensec/electronegativity@1.10.3 -i src -e 45.0.0 -o security-report.csv"
+    "security": "npm audit --omit=dev && npx --yes @doyensec/electronegativity@1.10.3 -i src -e 45.0.0 -o security-report.csv",
+    "doctor": "node scripts/doctor.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
